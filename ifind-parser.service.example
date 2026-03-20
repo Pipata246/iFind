@@ -1,0 +1,16 @@
+[Unit]
+Description=iFind Selenium Parser
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ifind
+EnvironmentFile=/opt/ifind/.env
+ExecStart=/opt/ifind/.venv/bin/python /opt/ifind/main.py --mode wb --keyword "iPhone" --model "13" --price-min 22000 --price-max 24000 --precision 7 --headless
+Restart=on-failure
+RestartSec=20
+User=ubuntu
+Group=ubuntu
+
+[Install]
+WantedBy=multi-user.target

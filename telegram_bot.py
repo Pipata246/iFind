@@ -1,0 +1,978 @@
+import asyncio
+import base64
+import io
+import os
+import re
+import threading
+from datetime import datetime, timezone
+
+from supabase import Client, create_client
+from telegram import KeyboardButton, ReplyKeyboardMarkup, Update
+from telegram.error import TimedOut, NetworkError
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+import time
+
+
+BOT_TOKEN = "8388606268:AAGZytFu6t2i6oEiaHgJFHwCbFJoCGbPSpA"
+SUPABASE_URL = "https://jfydcvornxzwuzjexiqb.supabase.co"
+SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpmeWRjdm9ybnh6d3V6amV4aXFiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM3NTM1MTgsImV4cCI6MjA4OTMyOTUxOH0.XmagPVxGHkAYqr_hSSlSrQ4nubOaTCUZlyzT0FbUgo4"
+SUPABASE_USERS_TABLE = "bot_users"
+SUPABASE_SETTINGS_TABLE = "bot_settings"
+SUPABASE_EXCEL_FILES_TABLE = "bot_excel_files"
+
+BTN_MANUAL_RUN = "🚀 Ручной запуск"
+BTN_HELP = "📘 Инструкция"
+BTN_AUTO_SETTINGS = "⚙️ Настройки автопарсинга"
+BTN_EXCEL = "📄 Excel файлы"
+BTN_AVITO = "🇦🇺 Авито"
+BTN_WB = "🛒 ВБ"
+BTN_CANCEL = "Отмена"
+BTN_EDIT = "Изменить"
+BTN_MANUAL_AVITO_MY = "✅ Парсинг с моими настройками"
+BTN_MANUAL_AVITO_MANUAL = "✍️ Задать вручную"
+BTN_STOP_PARSING = "⛔ Остановить парсинг"
+
+
+def build_supabase_client() -> Client:
+  return create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+
+
+def upsert_user_to_supabase(client: Client, update: Update):
+  user = update.effective_user
+  if not user:
+    return
+
+  now_iso = datetime.now(timezone.utc).isoformat()
+  payload = {
+    "telegram_id": user.id,
+    "username": user.username,
+    "first_name": user.first_name,
+    "last_name": user.last_name,
+    "language_code": user.language_code,
+    "is_bot": user.is_bot,
+    "last_seen_at": now_iso,
+    # На апдейте поле останется прежним, если уже было записано.
+    "started_at": now_iso,
+  }
+  client.table(SUPABASE_USERS_TABLE).upsert(payload, on_conflict="telegram_id").execute()
+
+
+def build_main_keyboard():
+  keyboard = [
+    [KeyboardButton(BTN_MANUAL_RUN), KeyboardButton(BTN_HELP)],
+    [KeyboardButton(BTN_AUTO_SETTINGS), KeyboardButton(BTN_EXCEL)],
+  ]
+  return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True, one_time_keyboard=False)
+
+
+def build_cancel_keyboard():
+  keyboard = [[KeyboardButton(BTN_CANCEL)]]
+  return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True, one_time_keyboard=False)
+
+
+def build_platform_keyboard():
+  keyboard = [
+    [KeyboardButton(BTN_AVITO), KeyboardButton(BTN_WB)],
+    [KeyboardButton(BTN_CANCEL)],
+  ]
+  return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True, one_time_keyboard=False)
+
+
+def build_edit_keyboard():
+  keyboard = [
+    [KeyboardButton(BTN_EDIT)],
+    [KeyboardButton(BTN_CANCEL)],
+  ]
+  return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True, one_time_keyboard=False)
+
+
+def build_stop_keyboard():
+  keyboard = [[KeyboardButton(BTN_STOP_PARSING)]]
+  return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True, one_time_keyboard=False)
+
+
+def build_manual_avito_keyboard():
+  keyboard = [
+    [KeyboardButton(BTN_MANUAL_AVITO_MY), KeyboardButton(BTN_MANUAL_AVITO_MANUAL)],
+    [KeyboardButton(BTN_CANCEL)],
+  ]
+  return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True, one_time_keyboard=False)
+
+
+def parse_csv_list(text: str):
+  if not text:
+    return []
+  parts = [p.strip() for p in text.split(",")]
+  return [p for p in parts if p]
+
+
+def normalize_seller_type(text: str):
+  s = (text or "").strip().lower()
+  mapping = {
+    "all": "all",
+    "все": "all",
+    "частные": "private",
+    "private": "private",
+    "компании": "company",
+    "company": "company",
+    "юрлица": "company",
+  }
+  return mapping.get(s)
+
+
+def _format_list(val):
+  if not val:
+    return "-"
+  if isinstance(val, list):
+    return ", ".join([str(x) for x in val if x])
+  return str(val)
+
+
+def format_settings_for_user(settings: dict):
+  if not settings:
+    return "Настройки не заданы."
+  return (
+    "Ваши настройки Avito:\n"
+    f"• Название: {settings.get('keyword') or '-'}\n"
+    f"• Модель: {settings.get('model') or '-'}\n"
+    f"• Город: {settings.get('city') or '-'}\n"
+    f"• Цена: {settings.get('price_min') or '-'} — {settings.get('price_max') or '-'}\n\n"
+    "Расширенные фильтры:\n"
+    f"• Память: {_format_list(settings.get('memory'))}\n"
+    f"• Оперативная память: {_format_list(settings.get('ram'))}\n"
+    f"• SIM: {_format_list(settings.get('sim'))}\n"
+    f"• Цвета: {_format_list(settings.get('colors'))}\n"
+    f"• Состояние: {_format_list(settings.get('condition'))}\n"
+    f"• Продавцы: {'-' if not settings.get('seller_type') or settings.get('seller_type') == 'all' else settings.get('seller_type')}\n"
+    f"• Только 4 звезды и выше: {'да' if settings.get('rating_4_plus') is True else '-'}\n"
+    f"• Точность парсинга: {settings.get('precision') or '-'}"
+  )
+
+
+def _excel_file_to_base64(filepath: str) -> str:
+  with open(filepath, "rb") as f:
+    raw = f.read()
+  return base64.b64encode(raw).decode("utf-8")
+
+
+def upload_excel_file_to_supabase(supabase: Client, telegram_id: int, filepath: str):
+  if not filepath or not os.path.exists(filepath):
+    raise FileNotFoundError(filepath)
+  filename = os.path.basename(filepath)
+  content_b64 = _excel_file_to_base64(filepath)
+  payload = {
+    "telegram_id": telegram_id,
+    "filename": filename,
+    "content_base64": content_b64,
+    "created_at": datetime.now(timezone.utc).isoformat(),
+  }
+  # Каждый запуск создаёт новый файл. Защита от дублей — опционально.
+  return supabase.table(SUPABASE_EXCEL_FILES_TABLE).insert(payload).execute()
+
+
+async def send_excel_files_from_supabase(update: Update, context: ContextTypes.DEFAULT_TYPE):
+  supabase: Client = context.bot_data.get("supabase_client")
+  telegram_id = update.effective_user.id
+  res = (
+    supabase.table(SUPABASE_EXCEL_FILES_TABLE)
+    .select("filename, content_base64, created_at")
+    .eq("telegram_id", telegram_id)
+    .order("created_at", desc=True)
+    .limit(10)
+    .execute()
+  )
+  files = res.data or []
+  if not files:
+    await update.message.reply_text("Пока нет сохраненных Excel файлов.")
+    return
+
+  await update.message.reply_text(f"Найдено файлов: {len(files)}. Загружаю…")
+  for f in files:
+    try:
+      b = base64.b64decode(f.get("content_base64") or "")
+      bio = io.BytesIO(b)
+      bio.name = f.get("filename") or "file.xlsx"
+      await update.message.reply_document(document=bio, filename=bio.name)
+    except Exception as e:
+      print(f"[Supabase] Ошибка отправки файла: {e}")
+
+
+async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFAULT_TYPE, settings: dict):
+  # Импортируем локально, чтобы не тянуть Selenium при старте бота
+  from main import build_driver
+  from avito_parser import parse_avito
+  from excel_export import export_to_excel
+
+  supabase: Client = context.bot_data.get("supabase_client")
+  telegram_id = update.effective_user.id
+
+  keyword = settings.get("keyword")
+  model = settings.get("model")
+  city = settings.get("city")
+  price_min = settings.get("price_min")
+  price_max = settings.get("price_max")
+  precision = settings.get("precision") or 7
+
+  filters = {
+    "memory": settings.get("memory") or [],
+    "ram": settings.get("ram") or [],
+    "sim": settings.get("sim") or [],
+    "colors": settings.get("colors") or [],
+    "condition": settings.get("condition") or [],
+    "seller_type": settings.get("seller_type") or "all",
+    "rating_4_plus": bool(settings.get("rating_4_plus")),
+  }
+
+  stop_event = threading.Event()
+  context.user_data["active_parse"] = {"platform": "avito", "stop_event": stop_event, "driver": None}
+
+  await update.message.reply_text(
+    "Идет парсинг Avito. Подождите, пока бот соберет все данные…",
+    reply_markup=build_stop_keyboard(),
+  )
+
+  def _sync():
+    driver = None
+    try:
+      driver = build_driver(headless=True)
+      context.user_data["active_parse"]["driver"] = driver
+      items = parse_avito(
+        driver,
+        keyword,
+        model,
+        city,
+        price_min,
+        price_max,
+        precision=precision,
+        filters=filters,
+        stop_event=stop_event,
+      )
+      if stop_event.is_set():
+        return None
+      filepath = export_to_excel(items, filename_prefix="parsing_avito")
+      return filepath
+    finally:
+      try:
+        if driver:
+          # На всякий случай чистим ссылку на драйвер
+          if context.user_data.get("active_parse"):
+            context.user_data["active_parse"]["driver"] = None
+          driver.quit()
+      except Exception:
+        pass
+
+  try:
+    filepath = await asyncio.to_thread(_sync)
+  except Exception as e:
+    context.user_data.pop("active_parse", None)
+    stop_event.set()
+    if stop_event.is_set() and context.user_data.get("stop_notified"):
+      context.user_data.pop("stop_notified", None)
+      return
+    if stop_event.is_set():
+      await update.message.reply_text(
+        "Парсинг остановлен пользователем.",
+        reply_markup=build_main_keyboard(),
+      )
+    else:
+      await update.message.reply_text(
+        f"Ошибка запуска парсинга: {e}",
+        reply_markup=build_main_keyboard(),
+      )
+    return
+  context.user_data.pop("active_parse", None)
+
+  # Сообщение об остановке уже отправлено кнопкой. Не дублируем.
+  if stop_event.is_set() and context.user_data.get("stop_notified"):
+    context.user_data.pop("stop_notified", None)
+    return
+
+  if not filepath:
+    if stop_event.is_set():
+      await update.message.reply_text(
+        "Парсинг остановлен пользователем.",
+        reply_markup=build_main_keyboard(),
+      )
+    else:
+      await update.message.reply_text(
+        "Парсинг завершен, но Excel не сформирован (нет данных).",
+        reply_markup=build_main_keyboard(),
+      )
+    return
+
+  if stop_event.is_set():
+    await update.message.reply_text(
+      "Парсинг остановлен пользователем. Загружаю Excel в БД…",
+      reply_markup=build_main_keyboard(),
+    )
+  else:
+    await update.message.reply_text("Парсинг готов. Загружаю Excel в БД…", reply_markup=build_main_keyboard())
+  await asyncio.to_thread(upload_excel_file_to_supabase, supabase, telegram_id, filepath)
+  await update.message.reply_text("Excel сохранен ✅ Откройте «📄 Excel файлы», чтобы скачать.", reply_markup=build_main_keyboard())
+
+
+def get_user_settings(client: Client, telegram_id: int):
+  try:
+    res = (
+      client.table(SUPABASE_SETTINGS_TABLE)
+      .select("*")
+      .eq("telegram_id", telegram_id)
+      .maybe_single()
+      .execute()
+    )
+    return res.data
+  except Exception as e:
+    print(f"[Supabase] Ошибка get_user_settings: {e}")
+    return None
+
+
+def upsert_user_settings(client: Client, telegram_id: int, settings: dict):
+  now_iso = datetime.now(timezone.utc).isoformat()
+  payload = {
+    "telegram_id": telegram_id,
+    "platform": "avito",
+    "keyword": settings.get("keyword"),
+    "model": settings.get("model"),
+    "city": settings.get("city"),
+    "price_min": settings.get("price_min"),
+    "price_max": settings.get("price_max"),
+    "memory": settings.get("memory") or [],
+    "ram": settings.get("ram") or [],
+    "sim": settings.get("sim") or [],
+    "colors": settings.get("colors") or [],
+    "condition": settings.get("condition") or [],
+    # NULL/None = "значение по умолчанию" (фильтр не применяется)
+    "seller_type": settings.get("seller_type"),
+    "rating_4_plus": settings.get("rating_4_plus"),
+    "precision": settings.get("precision") or 7,
+    "updated_at": now_iso,
+  }
+  return client.table(SUPABASE_SETTINGS_TABLE).upsert(payload, on_conflict="telegram_id").execute()
+
+
+async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+  try:
+    supabase: Client = context.bot_data["supabase_client"]
+    upsert_user_to_supabase(supabase, update)
+  except Exception as e:
+    # Не ломаем бота, если таблица в Supabase еще не создана/неверная схема.
+    print(f"[Supabase] Не удалось сохранить пользователя: {e}")
+
+  text = (
+    "Привет! 👋\n\n"
+    "Я бот для управления вашим парсером объявлений.\n"
+    "Здесь можно быстро запускать парсинг и работать с результатами.\n\n"
+    "Выберите действие в нижнем меню:\n"
+    "🚀 Ручной запуск\n"
+    "📘 Инструкция\n"
+    "⚙️ Настройки автопарсинга\n"
+    "📄 Excel файлы"
+  )
+  await update.message.reply_text(text, reply_markup=build_main_keyboard())
+
+
+async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+  try:
+    supabase: Client = context.bot_data["supabase_client"]
+    upsert_user_to_supabase(supabase, update)
+  except Exception as e:
+    print(f"[Supabase] Не удалось обновить last_seen: {e}")
+
+  user_text = (update.message.text or "").strip()
+
+  # Остановка текущего парсинга (если идет)
+  active_parse = context.user_data.get("active_parse")
+  if active_parse and user_text == BTN_STOP_PARSING:
+    stop_event = active_parse.get("stop_event")
+    if stop_event is not None:
+      stop_event.set()
+    # Жестко прерываем Selenium, чтобы ожидания/скролл оборвались моментально.
+    try:
+      drv = active_parse.get("driver")
+      if drv is not None:
+        try:
+          drv.quit()
+        except Exception:
+          pass
+    except Exception:
+      pass
+
+    context.user_data["stop_notified"] = True
+    await update.message.reply_text(
+      "Парсинг остановлен (запрос принят).",
+      reply_markup=build_main_keyboard(),
+    )
+    return
+
+  # Мастер-настройки (без inline-кнопок): хранится в context.user_data
+  wizard = context.user_data.get("wizard")
+  if wizard:
+    state = wizard.get("state")
+    draft = wizard.get("draft") or {}
+
+    if user_text == BTN_CANCEL:
+      context.user_data.pop("wizard", None)
+      await update.message.reply_text("Ок, отменено.", reply_markup=build_main_keyboard())
+      return
+
+    supabase: Client = context.bot_data.get("supabase_client")
+    telegram_id = update.effective_user.id
+
+    if state == "platform":
+      if user_text == BTN_WB:
+        await update.message.reply_text(
+          "Парсер Wildberries пока в разработке. Используйте Авито.",
+          reply_markup=build_main_keyboard(),
+        )
+        context.user_data.pop("wizard", None)
+        return
+      if user_text != BTN_AVITO:
+        await update.message.reply_text("Нажмите “Авито” или “ВБ”.", reply_markup=build_platform_keyboard())
+        return
+
+      settings = get_user_settings(supabase, telegram_id)
+      if not settings:
+        settings = {
+          "keyword": None,
+          "model": None,
+          "city": None,
+          "price_min": None,
+          "price_max": None,
+          "memory": [],
+          "ram": [],
+          "sim": [],
+          "colors": [],
+          "condition": [],
+          "seller_type": None,
+          "rating_4_plus": None,
+          "precision": 7,
+        }
+      else:
+        # Нормализуем старые/дефолтные значения: "не применять фильтр" = None
+        if settings.get("seller_type") == "all":
+          settings["seller_type"] = None
+        if settings.get("rating_4_plus") is not True:
+          settings["rating_4_plus"] = None
+
+      await update.message.reply_text(
+        f"{format_settings_for_user(settings)}\n\nНажмите “{BTN_EDIT}”, чтобы изменить настройки.",
+        reply_markup=build_edit_keyboard(),
+      )
+      # Чтобы пользователь мог пропускать шаги через "-", храним текущие настройки
+      # и на "Изменить" показываем их как значения по умолчанию.
+      wizard["base_settings"] = settings
+      wizard["draft"] = dict(settings)
+      wizard["state"] = "edit_decision"
+      context.user_data["wizard"] = wizard
+      return
+
+    if state == "edit_decision":
+      if user_text != BTN_EDIT:
+        await update.message.reply_text("Ничего не меняем. Ок.", reply_markup=build_main_keyboard())
+        context.user_data.pop("wizard", None)
+        return
+      base = wizard.get("base_settings") or {}
+      if not base:
+        base = {"rating_4_plus": None, "seller_type": None, "precision": 7}
+      # Копируем base в draft, чтобы шаги со знаком "-" могли оставить текущие значения.
+      wizard["draft"] = dict(base)
+      wizard["state"] = "keyword"
+      await update.message.reply_text(
+        "Шаг 1/14. Введите Название (например: iPhone, Samsung).\n"
+        "Если не нужно менять — вводи '-'.",
+        reply_markup=build_cancel_keyboard(),
+      )
+      return
+
+    def parse_price_int(t):
+      s = (t or "").strip().replace(" ", "")
+      s = re.sub(r"[^\d]", "", s)
+      if not s:
+        return None
+      return int(s)
+
+    if state == "keyword":
+      if user_text == "-":
+        if draft.get("keyword"):
+          wizard["draft"] = draft
+          wizard["state"] = "model"
+          await update.message.reply_text(
+            "Пропускаем название. Берем текущее значение.\n"
+            "Шаг 2/14. Введите модель (например: 17 pro max, galaxy se):",
+            reply_markup=build_cancel_keyboard(),
+          )
+          return
+        await update.message.reply_text("Название нельзя пропустить, если его еще нет. Введите значение или используйте “Изменить” позже.", reply_markup=build_cancel_keyboard())
+        return
+      if not user_text:
+        await update.message.reply_text("Введите непустое название.", reply_markup=build_cancel_keyboard())
+        return
+      draft["keyword"] = user_text
+      wizard["draft"] = draft
+      wizard["state"] = "model"
+      await update.message.reply_text(
+        "Шаг 2/14. Введите модель (например: 17 pro max, galaxy se):",
+        reply_markup=build_cancel_keyboard(),
+      )
+      return
+
+    if state == "model":
+      if user_text == "-":
+        if draft.get("model"):
+          wizard["draft"] = draft
+          wizard["state"] = "city"
+          await update.message.reply_text(
+            "Пропускаем модель. Берем текущее значение.\n"
+            "Шаг 3/14. Введите город (например: Самара):",
+            reply_markup=build_cancel_keyboard(),
+          )
+          return
+        await update.message.reply_text("Модель нельзя пропустить, если ее еще нет. Введите значение или используйте “Изменить” позже.", reply_markup=build_cancel_keyboard())
+        return
+      if not user_text:
+        await update.message.reply_text("Введите непустую модель.", reply_markup=build_cancel_keyboard())
+        return
+      draft["model"] = user_text
+      wizard["draft"] = draft
+      wizard["state"] = "city"
+      await update.message.reply_text(
+        "Шаг 3/14. Введите город (например: Самара):",
+        reply_markup=build_cancel_keyboard(),
+      )
+      return
+
+    if state == "city":
+      if user_text == "-":
+        if draft.get("city"):
+          wizard["draft"] = draft
+          wizard["state"] = "price_min"
+          await update.message.reply_text(
+            "Пропускаем город. Берем текущее значение.\n"
+            "Шаг 4/14. Цена от (число, пример: 15000):",
+            reply_markup=build_cancel_keyboard(),
+          )
+          return
+        await update.message.reply_text("Город нельзя пропустить, если его еще нет. Введите значение.", reply_markup=build_cancel_keyboard())
+        return
+      if not user_text:
+        await update.message.reply_text("Введите непустой город.", reply_markup=build_cancel_keyboard())
+        return
+      draft["city"] = user_text
+      wizard["draft"] = draft
+      wizard["state"] = "price_min"
+      await update.message.reply_text(
+        "Шаг 4/14. Цена от (число, пример: 15000):",
+        reply_markup=build_cancel_keyboard(),
+      )
+      return
+
+    if state == "price_min":
+      if user_text == "-":
+        draft["price_min"] = None
+        wizard["draft"] = draft
+        wizard["state"] = "price_max"
+        await update.message.reply_text(
+          "Пропускаем цену от. Берем текущее значение (если есть) или None.\n"
+          "Шаг 5/14. Цена до (число, пример: 35000):",
+          reply_markup=build_cancel_keyboard(),
+        )
+        return
+      v = parse_price_int(user_text)
+      if v is None:
+        await update.message.reply_text("Введите цену от числом. Пример: 15000", reply_markup=build_cancel_keyboard())
+        return
+      draft["price_min"] = v
+      wizard["draft"] = draft
+      wizard["state"] = "price_max"
+      await update.message.reply_text(
+        "Шаг 5/14. Цена до (число, пример: 35000):",
+        reply_markup=build_cancel_keyboard(),
+      )
+      return
+
+    if state == "price_max":
+      if user_text == "-":
+        draft["price_max"] = None
+        wizard["draft"] = draft
+        wizard["state"] = "memory"
+        await update.message.reply_text(
+          "Пропускаем цену до. Берем None.\n"
+          "Шаг 6/14. Память (через запятую, пример: 128 ГБ,256 ГБ):",
+          reply_markup=build_cancel_keyboard(),
+        )
+        return
+      v = parse_price_int(user_text)
+      if v is None:
+        await update.message.reply_text("Введите цену до числом. Пример: 35000", reply_markup=build_cancel_keyboard())
+        return
+      if draft.get("price_min") is not None and v < draft["price_min"]:
+        await update.message.reply_text("Цена до должна быть >= цене от.", reply_markup=build_cancel_keyboard())
+        return
+      draft["price_max"] = v
+      wizard["draft"] = draft
+      wizard["state"] = "memory"
+      await update.message.reply_text(
+        "Шаг 6/14. Память (через запятую, пример: 128 ГБ,256 ГБ):",
+        reply_markup=build_cancel_keyboard(),
+      )
+      return
+
+    if state == "memory":
+      if user_text == "-":
+        draft["memory"] = []
+        wizard["draft"] = draft
+        wizard["state"] = "ram"
+        await update.message.reply_text(
+          "Пропускаем память. Фильтр не применяется.\n"
+          "Шаг 7/14. Оперативная память (пример: 4 ГБ,6 ГБ):",
+          reply_markup=build_cancel_keyboard(),
+        )
+        return
+      items = parse_csv_list(user_text)
+      if not items:
+        await update.message.reply_text("Введите хотя бы одно значение памяти. Пример: 128 ГБ,256 ГБ", reply_markup=build_cancel_keyboard())
+        return
+      draft["memory"] = items
+      wizard["draft"] = draft
+      wizard["state"] = "ram"
+      await update.message.reply_text(
+        "Шаг 7/14. Оперативная память (пример: 4 ГБ,6 ГБ):",
+        reply_markup=build_cancel_keyboard(),
+      )
+      return
+
+    if state == "ram":
+      if user_text == "-":
+        draft["ram"] = []
+        wizard["draft"] = draft
+        wizard["state"] = "sim"
+        await update.message.reply_text(
+          "Пропускаем оперативную память. Фильтр не применяется.\n"
+          "Шаг 8/14. SIM (пример: SIM + eSIM,2 SIM,1 SIM,eSIM):",
+          reply_markup=build_cancel_keyboard(),
+        )
+        return
+      items = parse_csv_list(user_text)
+      if not items:
+        await update.message.reply_text("Введите хотя бы одно значение оперативной памяти. Пример: 4 ГБ,6 ГБ", reply_markup=build_cancel_keyboard())
+        return
+      draft["ram"] = items
+      wizard["draft"] = draft
+      wizard["state"] = "sim"
+      await update.message.reply_text(
+        "Шаг 8/14. SIM (пример: SIM + eSIM,2 SIM,1 SIM,eSIM):",
+        reply_markup=build_cancel_keyboard(),
+      )
+      return
+
+    if state == "sim":
+      if user_text == "-":
+        draft["sim"] = []
+        wizard["draft"] = draft
+        wizard["state"] = "colors"
+        await update.message.reply_text(
+          "Пропускаем SIM. Фильтр не применяется.\n"
+          "Шаг 9/14. Цвета (пример: Белый,Зелёный):",
+          reply_markup=build_cancel_keyboard(),
+        )
+        return
+      items = parse_csv_list(user_text)
+      if not items:
+        await update.message.reply_text("Введите хотя бы одно значение SIM. Пример: SIM + eSIM,2 SIM", reply_markup=build_cancel_keyboard())
+        return
+      draft["sim"] = items
+      wizard["draft"] = draft
+      wizard["state"] = "colors"
+      await update.message.reply_text(
+        "Шаг 9/14. Цвета (пример: Белый,Зелёный):",
+        reply_markup=build_cancel_keyboard(),
+      )
+      return
+
+    if state == "colors":
+      if user_text == "-":
+        draft["colors"] = []
+        wizard["draft"] = draft
+        wizard["state"] = "condition"
+        await update.message.reply_text(
+          "Пропускаем цвета. Фильтр не применяется.\n"
+          "Шаг 10/14. Состояние (пример: Отличное,Хорошее):",
+          reply_markup=build_cancel_keyboard(),
+        )
+        return
+      items = parse_csv_list(user_text)
+      if not items:
+        await update.message.reply_text("Введите хотя бы один цвет. Пример: Белый,Зелёный", reply_markup=build_cancel_keyboard())
+        return
+      draft["colors"] = items
+      wizard["draft"] = draft
+      wizard["state"] = "condition"
+      await update.message.reply_text(
+        "Шаг 10/14. Состояние (пример: Отличное,Хорошее):",
+        reply_markup=build_cancel_keyboard(),
+      )
+      return
+
+    if state == "condition":
+      if user_text == "-":
+        draft["condition"] = []
+        wizard["draft"] = draft
+        wizard["state"] = "seller_type"
+        await update.message.reply_text(
+          "Пропускаем состояние. Фильтр не применяется.\n"
+          "Шаг 11/14. Продавцы: all / private / company (или Все / Частные / Компании) (или '-' по умолчанию):",
+          reply_markup=build_cancel_keyboard(),
+        )
+        return
+      items = parse_csv_list(user_text)
+      if not items:
+        await update.message.reply_text("Введите хотя бы одно состояние. Пример: Отличное,Хорошее", reply_markup=build_cancel_keyboard())
+        return
+      draft["condition"] = items
+      wizard["draft"] = draft
+      wizard["state"] = "seller_type"
+      await update.message.reply_text(
+        "Шаг 11/14. Продавцы: all / private / company (или Все / Частные / Компании) (или '-' по умолчанию):",
+        reply_markup=build_cancel_keyboard(),
+      )
+      return
+
+    if state == "seller_type":
+      if user_text == "-":
+        draft["seller_type"] = draft.get("seller_type")
+        wizard["draft"] = draft
+        wizard["state"] = "rating_4_plus"
+        await update.message.reply_text(
+          "Пропускаем продавцов. Берем текущее значение.\n"
+          "Шаг 12/14. Только 4 звезды и выше? y/n (или '-' по умолчанию):",
+          reply_markup=build_cancel_keyboard(),
+        )
+        return
+      v = normalize_seller_type(user_text)
+      if not v:
+        await update.message.reply_text("Не понял. Введите all/private/company или Все/Частные/Компании.", reply_markup=build_cancel_keyboard())
+        return
+      draft["seller_type"] = None if v == "all" else v
+      wizard["draft"] = draft
+      wizard["state"] = "rating_4_plus"
+      await update.message.reply_text(
+        "Шаг 12/14. Только 4 звезды и выше? y/n (или '-' по умолчанию):",
+        reply_markup=build_cancel_keyboard(),
+      )
+      return
+
+    if state == "rating_4_plus":
+      if user_text == "-":
+        draft["rating_4_plus"] = draft.get("rating_4_plus")
+        wizard["draft"] = draft
+        wizard["state"] = "precision"
+        await update.message.reply_text(
+          "Пропускаем 4 звезды и выше. Берем текущее значение.\n"
+          "Шаг 13/14. Точность парсинга (1–10):",
+          reply_markup=build_cancel_keyboard(),
+        )
+        return
+      s = (user_text or "").strip().lower()
+      if s not in ("y", "yes", "да", "n", "no", "нет"):
+        await update.message.reply_text("Введите y/n (да/нет). Пример: y", reply_markup=build_cancel_keyboard())
+        return
+      draft["rating_4_plus"] = True if s in ("y", "yes", "да") else None
+      wizard["draft"] = draft
+      wizard["state"] = "precision"
+      await update.message.reply_text(
+        "Шаг 13/14. Точность парсинга (1–10):",
+        reply_markup=build_cancel_keyboard(),
+      )
+      return
+
+    if state == "precision":
+      persist = wizard.get("persist_settings", True)
+      if user_text == "-":
+        draft["precision"] = int(draft.get("precision") or 7)
+        wizard["draft"] = draft
+        # Финал: сохраняем в Supabase только если persist_settings=True
+        if persist:
+          try:
+            upsert_user_settings(supabase, telegram_id, draft)
+          except Exception as e:
+            await update.message.reply_text(
+              f"Ошибка сохранения в Supabase: {e}",
+              reply_markup=build_main_keyboard(),
+            )
+            context.user_data.pop("wizard", None)
+            return
+        await update.message.reply_text(
+          "Готово! Настройки сохранены ✅\n\n" + format_settings_for_user(draft)
+          if persist
+          else "Готово! Настройки применены для текущего запуска.\n\n" + format_settings_for_user(draft),
+          reply_markup=build_main_keyboard(),
+        )
+        context.user_data.pop("wizard", None)
+        # Если настройка была запрошена из ручного режима — запускаем парсинг сразу.
+        if context.user_data.get("after_wizard_action") == "run_avito":
+          context.user_data.pop("after_wizard_action", None)
+          await run_avito_parsing_and_store(update, context, draft)
+          return
+        return
+      try:
+        v = int(user_text.strip())
+      except Exception:
+        v = None
+      if v is None or v < 1 or v > 10:
+        await update.message.reply_text("Введите число 1–10.", reply_markup=build_cancel_keyboard())
+        return
+      draft["precision"] = v
+      # Финал: сохраняем в Supabase только если persist_settings=True
+      if persist:
+        try:
+          upsert_user_settings(supabase, telegram_id, draft)
+        except Exception as e:
+          await update.message.reply_text(
+            f"Ошибка сохранения в Supabase: {e}",
+            reply_markup=build_main_keyboard(),
+          )
+          context.user_data.pop("wizard", None)
+          return
+
+      await update.message.reply_text(
+        "Готово! Настройки сохранены ✅\n\n" + format_settings_for_user(draft)
+        if persist
+        else "Готово! Настройки применены для текущего запуска.\n\n" + format_settings_for_user(draft),
+        reply_markup=build_main_keyboard(),
+      )
+      context.user_data.pop("wizard", None)
+
+      # Если настройка была запрошена из ручного режима — запускаем парсинг сразу.
+      if context.user_data.get("after_wizard_action") == "run_avito":
+        context.user_data.pop("after_wizard_action", None)
+        await run_avito_parsing_and_store(update, context, draft)
+        return
+
+      return
+
+    await update.message.reply_text("Неизвестный шаг. Нажмите “Отмена”.", reply_markup=build_cancel_keyboard())
+    return
+
+  # Если мы не в режиме настройки — управляем ручным меню и Excel
+  manual = context.user_data.get("manual")
+  if manual:
+    state = manual.get("state")
+    if user_text == BTN_CANCEL:
+      context.user_data.pop("manual", None)
+      await update.message.reply_text("Ок, отменено.", reply_markup=build_main_keyboard())
+      return
+
+    supabase: Client = context.bot_data.get("supabase_client")
+    telegram_id = update.effective_user.id
+
+    if state == "platform":
+      if user_text == BTN_WB:
+        await update.message.reply_text(
+          "Парсер Wildberries пока в разработке.",
+          reply_markup=build_main_keyboard(),
+        )
+        context.user_data.pop("manual", None)
+        return
+      if user_text != BTN_AVITO:
+        await update.message.reply_text("Нажмите “Авито” или “ВБ”.", reply_markup=build_platform_keyboard())
+        return
+      context.user_data["manual"] = {"state": "avito_menu"}
+      await update.message.reply_text(
+        "Авито: выберите режим:",
+        reply_markup=build_manual_avito_keyboard(),
+      )
+      return
+
+    if state == "avito_menu":
+      if user_text == BTN_MANUAL_AVITO_MY:
+        settings = get_user_settings(supabase, telegram_id)
+        if not settings:
+          await update.message.reply_text(
+            "Настройки не найдены. Выберите “Задать вручную”.",
+            reply_markup=build_manual_avito_keyboard(),
+          )
+          return
+        context.user_data.pop("manual", None)
+        await run_avito_parsing_and_store(update, context, settings)
+        return
+      if user_text == BTN_MANUAL_AVITO_MANUAL:
+        context.user_data.pop("manual", None)
+        context.user_data["after_wizard_action"] = "run_avito"
+        # Стартуем мастер настроек с нуля (без “Выберите площадку”)
+        context.user_data["wizard"] = {
+          "persist_settings": False,
+          "state": "keyword",
+          "draft": {"rating_4_plus": None, "seller_type": None, "precision": 7},
+        }
+        await update.message.reply_text(
+          "Шаг 1/14. Введите Название (например: iPhone, Samsung).\n"
+          "Если не нужно менять — вводи '-'.",
+          reply_markup=build_cancel_keyboard(),
+        )
+        return
+      await update.message.reply_text("Нажмите одну из кнопок режима.", reply_markup=build_manual_avito_keyboard())
+      return
+
+  # Если мы не в режиме ручного меню
+  if user_text == BTN_AUTO_SETTINGS:
+    context.user_data["wizard"] = {"state": "platform", "draft": {}}
+    await update.message.reply_text(
+      "Выберите площадку для автопарсинга:",
+      reply_markup=build_platform_keyboard(),
+    )
+    return
+
+  if user_text == BTN_EXCEL:
+    await send_excel_files_from_supabase(update, context)
+    await update.message.reply_text("Готово.", reply_markup=build_main_keyboard())
+    return
+
+  if user_text == BTN_MANUAL_RUN:
+    context.user_data["manual"] = {"state": "platform"}
+    await update.message.reply_text(
+      "Ручной парсинг. Выберите площадку:",
+      reply_markup=build_platform_keyboard(),
+    )
+    return
+
+  if user_text == BTN_HELP:
+    await update.message.reply_text("Все работает", reply_markup=build_main_keyboard())
+    return
+
+  await update.message.reply_text(
+    "Используйте кнопки внизу.",
+    reply_markup=build_main_keyboard(),
+  )
+
+
+def main():
+  # Если Telegram медленный/частично недоступен (особенно в РФ),
+  # то на старте бот не должен крашиться — он будет повторять bootstrap.
+  retry_delay_seconds = 20
+  while True:
+    try:
+      app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .concurrent_updates(True)
+        # Длиннее таймауты для медленных подключений к Telegram.
+        .connect_timeout(30)
+        .read_timeout(30)
+        .write_timeout(30)
+        .pool_timeout(10)
+        .build()
+      )
+      app.bot_data["supabase_client"] = build_supabase_client()
+      app.add_handler(CommandHandler("start", start_handler))
+      app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, menu_handler))
+      print("Telegram bot started...")
+      app.run_polling(drop_pending_updates=True, bootstrap_retries=10)
+      return
+    except (TimedOut, NetworkError) as e:
+      print(f"[Telegram] Недоступен/медленный канал: {e}. Повтор через {retry_delay_seconds}s...")
+      time.sleep(retry_delay_seconds)
+      continue
+
+
+if __name__ == "__main__":
+  main()
