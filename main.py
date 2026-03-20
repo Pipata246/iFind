@@ -103,7 +103,18 @@ def build_driver(headless=True):
     chrome_options.add_argument("--disable-gpu")
 
   use_proxy = USE_MOBILE_PROXY and MOBILE_PROXY_HOST and str(MOBILE_PROXY_HOST).strip()
-  service = Service(os.getenv("CHROMEDRIVER_PATH") or ChromeDriverManager().install())
+
+  chromedriver_env_path = os.getenv("CHROMEDRIVER_PATH")
+  if chromedriver_env_path:
+    service = Service(chromedriver_env_path)
+  else:
+    # webdriver-manager can fail on some VPS setups (e.g. browser version detection).
+    # Fallback to Selenium Manager to auto-resolve the driver.
+    try:
+      service = Service(ChromeDriverManager().install())
+    except Exception as e:
+      print(f"[Driver] webdriver-manager failed: {e}. Fallback to Selenium Manager.")
+      service = Service()
 
   seleniumwire_options = {}
   if use_proxy:
