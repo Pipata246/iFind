@@ -3,4 +3,7 @@ selenium-wire==5.1.0
 webdriver-manager==4.0.1
 openpyxl==3.1.5
 beautifulsoup4==4.12.3
-setuptools>=70
+python-telegram-bot
+supabase
+blinker==1.7.0
+setuptools>=70,<81

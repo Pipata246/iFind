@@ -265,20 +265,13 @@ async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFA
     filepath = await asyncio.to_thread(_sync)
   except Exception as e:
     context.user_data.pop("active_parse", None)
-    stop_event.set()
-    if stop_event.is_set() and context.user_data.get("stop_notified"):
+    if context.user_data.get("stop_notified"):
       context.user_data.pop("stop_notified", None)
       return
-    if stop_event.is_set():
-      await update.message.reply_text(
-        "Парсинг остановлен пользователем.",
-        reply_markup=build_main_keyboard(),
-      )
-    else:
-      await update.message.reply_text(
-        f"Ошибка запуска парсинга: {e}",
-        reply_markup=build_main_keyboard(),
-      )
+    await update.message.reply_text(
+      f"Ошибка запуска парсинга: {e}",
+      reply_markup=build_main_keyboard(),
+    )
     return
   context.user_data.pop("active_parse", None)
 

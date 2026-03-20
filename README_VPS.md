@@ -29,7 +29,11 @@ Copy env template:
 cp .env.vps.example .env
 ```
 
-Then set variables in `.env` (proxy on/off, waits, base urls).
+Then set variables in `.env`:
+- `BOT_TOKEN`
+- `SUPABASE_URL`
+- `SUPABASE_ANON_KEY`
+- proxy on/off, waits, base urls
 
 ## 3) Run in non-interactive VPS mode
 
@@ -57,10 +61,10 @@ Use direct WB URL:
 python3 main.py --mode wb --wb-url "https://www.wildberries.ru/catalog/0/search.aspx?page=1&sort=popular&search=iphone+13" --precision 7 --headless
 ```
 
-## 4) Run as systemd service
+## 4) Run Telegram bot as systemd service
 
 1. Copy `ifind-parser.service.example` to `/etc/systemd/system/ifind-parser.service`
-2. Adjust `WorkingDirectory`, `ExecStart`, `User`, `Group`
+2. Verify `ExecStart` points to `telegram_bot.py`
 3. Start service:
 
 ```bash
