@@ -10,7 +10,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
-from config import EXPLICIT_WAIT, WB_BASE_URL
+from config import EXPLICIT_WAIT, WB_BASE_URL, VPS_LIGHT_MODE
 
 
 def build_wb_search_url(keyword, model, price_min=None, price_max=None, page=1):
@@ -40,6 +40,12 @@ def _precision_params(precision):
     scroll_delay = 1.0 + (precision / 10) * 2.0
     page_delay = 10.0 + (precision / 10) * 20.0
     load_delay = 3.0 + (precision / 10) * 4.0
+    if VPS_LIGHT_MODE:
+        max_pages = min(max_pages, 4)
+        scroll_passes = max(1, round(scroll_passes * 0.5))
+        scroll_delay = max(0.6, scroll_delay * 0.5)
+        page_delay = max(3.0, page_delay * 0.3)
+        load_delay = max(1.5, load_delay * 0.6)
     return {
         "max_pages": max_pages,
         "scroll_passes": scroll_passes,

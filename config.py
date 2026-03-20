@@ -52,3 +52,6 @@ EXPLICIT_WAIT = _env_int("EXPLICIT_WAIT", 45)
 AVITO_BASE_URL = os.getenv("AVITO_BASE_URL", "https://www.avito.ru").rstrip("/")
 WB_BASE_URL = os.getenv("WB_BASE_URL", "https://www.wildberries.ru").rstrip("/")
 
+# Light mode for low-resource VPS (1 vCPU / 1GB RAM): less pages and shorter pauses.
+VPS_LIGHT_MODE = _env_bool("VPS_LIGHT_MODE", False)
+

@@ -10,7 +10,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
-from config import AVITO_BASE_URL, EXPLICIT_WAIT
+from config import AVITO_BASE_URL, EXPLICIT_WAIT, VPS_LIGHT_MODE
 
 
 def _filters_to_excel_meta(filters):
@@ -67,6 +67,13 @@ def _precision_params(precision):
   scroll_delay = 1.5 + (precision / 10) * 2.5
   page_delay = 15.0 + (precision / 10) * 30.0
   load_delay = 5.0 + (precision / 10) * 5.0
+  if VPS_LIGHT_MODE:
+    # Lower CPU/RAM pressure and overall runtime for weak VPS.
+    max_pages = min(max_pages, 5)
+    scroll_passes = max(0, round(scroll_passes * 0.45))
+    scroll_delay = max(0.7, scroll_delay * 0.45)
+    page_delay = max(4.0, page_delay * 0.25)
+    load_delay = max(2.0, load_delay * 0.55)
   return {"max_pages": max_pages, "scroll_passes": scroll_passes, "scroll_delay": scroll_delay, "page_delay": page_delay, "load_delay": load_delay}
 
 

@@ -34,6 +34,7 @@ Then set variables in `.env`:
 - `SUPABASE_URL`
 - `SUPABASE_ANON_KEY`
 - proxy on/off, waits, base urls
+- `VPS_LIGHT_MODE=true` for 1 vCPU / 1GB VPS (faster, lighter parsing)
 
 ## 3) Run in non-interactive VPS mode
 
