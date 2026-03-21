@@ -39,7 +39,7 @@ def _env_int(name, default):
     return default
 
 
-USE_MOBILE_PROXY = _env_bool("USE_MOBILE_PROXY", False)
+USE_MOBILE_PROXY = _env_bool("USE_MOBILE_PROXY", True)
 
 MOBILE_PROXY_HOST = os.getenv("MOBILE_PROXY_HOST", "91.221.70.204")
 MOBILE_PROXY_PORT = _env_int("MOBILE_PROXY_PORT", 10237)
