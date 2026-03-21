@@ -106,6 +106,30 @@ def parse_csv_list(text: str):
   return [p for p in parts if p]
 
 
+def normalize_capacity_values(values):
+  """Normalize values like 128, 128gb, 128 ГБ into '128 ГБ'."""
+  out = []
+  for v in (values or []):
+    s = (str(v) if v is not None else "").strip()
+    if not s:
+      continue
+    digits = re.sub(r"\D", "", s)
+    if digits:
+      out.append(f"{int(digits)} ГБ")
+    else:
+      out.append(s)
+  # keep order, unique
+  uniq = []
+  seen = set()
+  for x in out:
+    k = x.lower()
+    if k in seen:
+      continue
+    seen.add(k)
+    uniq.append(x)
+  return uniq
+
+
 def normalize_seller_type(text: str):
   s = (text or "").strip().lower()
   mapping = {
@@ -214,8 +238,8 @@ async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFA
   precision = settings.get("precision") or 7
 
   filters = {
-    "memory": settings.get("memory") or [],
-    "ram": settings.get("ram") or [],
+    "memory": normalize_capacity_values(settings.get("memory") or []),
+    "ram": normalize_capacity_values(settings.get("ram") or []),
     "sim": settings.get("sim") or [],
     "colors": settings.get("colors") or [],
     "condition": settings.get("condition") or [],
@@ -361,8 +385,8 @@ def upsert_user_settings(client: Client, telegram_id: int, settings: dict):
     "city": settings.get("city"),
     "price_min": settings.get("price_min"),
     "price_max": settings.get("price_max"),
-    "memory": settings.get("memory") or [],
-    "ram": settings.get("ram") or [],
+    "memory": normalize_capacity_values(settings.get("memory") or []),
+    "ram": normalize_capacity_values(settings.get("ram") or []),
     "sim": settings.get("sim") or [],
     "colors": settings.get("colors") or [],
     "condition": settings.get("condition") or [],
@@ -657,7 +681,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
       if not items:
         await update.message.reply_text("Введите хотя бы одно значение памяти. Пример: 128 ГБ,256 ГБ", reply_markup=build_cancel_keyboard())
         return
-      draft["memory"] = items
+      draft["memory"] = normalize_capacity_values(items)
       wizard["draft"] = draft
       wizard["state"] = "ram"
       await update.message.reply_text(
@@ -681,7 +705,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
       if not items:
         await update.message.reply_text("Введите хотя бы одно значение оперативной памяти. Пример: 4 ГБ,6 ГБ", reply_markup=build_cancel_keyboard())
         return
-      draft["ram"] = items
+      draft["ram"] = normalize_capacity_values(items)
       wizard["draft"] = draft
       wizard["state"] = "sim"
       await update.message.reply_text(

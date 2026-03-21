@@ -247,6 +247,35 @@ def _click_text_option(driver, text, must_be_checkbox=False):
   return False
 
 
+def _capacity_variants(value):
+  """Generate robust textual variants for values like 128GB/128 ГБ/128."""
+  raw = (value or "").strip()
+  if not raw:
+    return []
+  variants = [raw]
+  digits = re.sub(r"\D", "", raw)
+  if digits:
+    variants.extend(
+      [
+        digits,
+        f"{digits} ГБ",
+        f"{digits}гб",
+        f"{digits} GB",
+        f"{digits}GB",
+      ]
+    )
+  # keep order, remove duplicates
+  out = []
+  seen = set()
+  for v in variants:
+    k = v.strip().lower()
+    if not k or k in seen:
+      continue
+    seen.add(k)
+    out.append(v)
+  return out
+
+
 def _click_show_results_button(driver):
   """Надежно нажимает кнопку 'Показать N объявлений' после фильтров."""
   xpaths = [
@@ -333,14 +362,24 @@ def _apply_avito_ui_filters(driver, filters):
   }
 
   for value in filters.get("memory", []):
-    if _click_text_option(driver, value, must_be_checkbox=True):
+    ok = False
+    for option in _capacity_variants(value):
+      if _click_text_option(driver, option, must_be_checkbox=True):
+        ok = True
+        break
+    if ok:
       applied["memory"] += 1
       sleep(0.2)
     else:
       print(f"[AVITO] Не найден фильтр памяти: {value}")
 
   for value in filters.get("ram", []):
-    if _click_text_option(driver, value, must_be_checkbox=True):
+    ok = False
+    for option in _capacity_variants(value):
+      if _click_text_option(driver, option, must_be_checkbox=True):
+        ok = True
+        break
+    if ok:
       applied["ram"] += 1
       sleep(0.2)
     else:
