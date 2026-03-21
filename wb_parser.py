@@ -3,6 +3,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 from time import sleep
+import requests
 
 from bs4 import BeautifulSoup
 from selenium.common.exceptions import TimeoutException, WebDriverException
@@ -10,7 +11,16 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
-from config import EXPLICIT_WAIT, WB_BASE_URL, VPS_LIGHT_MODE
+from config import (
+    EXPLICIT_WAIT,
+    WB_BASE_URL,
+    VPS_LIGHT_MODE,
+    USE_MOBILE_PROXY,
+    MOBILE_PROXY_HOST,
+    MOBILE_PROXY_PORT,
+    MOBILE_PROXY_USER,
+    MOBILE_PROXY_PASS,
+)
 
 
 def build_wb_search_url(keyword, model, price_min=None, price_max=None, page=1):
@@ -109,6 +119,23 @@ def _save_debug_snapshot(driver, tag):
         pass
 
 
+def _get_proxy_outbound_ip():
+    if not (USE_MOBILE_PROXY and MOBILE_PROXY_HOST and str(MOBILE_PROXY_HOST).strip()):
+        return ""
+    proxy_url = f"http://{MOBILE_PROXY_USER}:{MOBILE_PROXY_PASS}@{MOBILE_PROXY_HOST}:{MOBILE_PROXY_PORT}"
+    try:
+        r = requests.get(
+            "https://api.ipify.org",
+            proxies={"http": proxy_url, "https": proxy_url},
+            timeout=15,
+        )
+        if r.ok:
+            return (r.text or "").strip()
+    except Exception:
+        return ""
+    return ""
+
+
 def _parse_cards_bs(html):
     soup = BeautifulSoup(html, "html.parser")
     articles = soup.find_all("article")
@@ -170,6 +197,11 @@ def parse_wb(driver, keyword, model, price_min=None, price_max=None, precision=7
     sleep(first_delay)
 
     while page <= max_pages:
+        if USE_MOBILE_PROXY:
+            ip = _get_proxy_outbound_ip()
+            if ip:
+                print(f"[WB] Текущий внешний IP через прокси: {ip}")
+
         if wb_url:
             url = wb_url
         else:
@@ -213,9 +245,17 @@ def parse_wb(driver, keyword, model, price_min=None, price_max=None, precision=7
                     )
                 _save_debug_snapshot(driver, f"blocked_page{page}")
                 if page_attempt < max_page_attempts:
-                    cooldown = random.uniform(45, 90)
-                    print(f"[WB] Жду {cooldown:.0f} сек и пробую снова…")
+                    if USE_MOBILE_PROXY:
+                        cooldown = 130
+                        print("[WB] Жду 130 сек для ротации мобильного прокси и пробую снова…")
+                    else:
+                        cooldown = random.uniform(45, 90)
+                        print(f"[WB] Жду {cooldown:.0f} сек и пробую снова…")
                     sleep(cooldown)
+                    if USE_MOBILE_PROXY:
+                        new_ip = _get_proxy_outbound_ip()
+                        if new_ip:
+                            print(f"[WB] Новый внешний IP после ожидания: {new_ip}")
                     continue
                 print("[WB] Обнаружена защита от ботов. Парсинг WB остановлен.")
                 return all_items
