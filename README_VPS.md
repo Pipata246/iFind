@@ -52,6 +52,12 @@ Wildberries:
 python3 main.py --mode wb --keyword "iPhone" --model "13" --price-min 22000 --price-max 24000 --precision 7 --headless
 ```
 
+WB only today's items:
+
+```bash
+python3 main.py --mode wb --keyword "iPhone" --model "13" --price-min 22000 --price-max 24000 --wb-today-only --precision 7 --headless
+```
+
 Avito:
 
 ```bash

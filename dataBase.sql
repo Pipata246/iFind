@@ -39,11 +39,15 @@ create table if not exists public.bot_settings (
 
   seller_type text default 'all',
   rating_4_plus boolean default false,
+  wb_today_only boolean default false,
   precision integer default 7,
 
   created_at timestamptz default now(),
   updated_at timestamptz default now()
 );
+
+alter table public.bot_settings
+add column if not exists wb_today_only boolean default false;
 
 alter table public.bot_settings enable row level security;
 

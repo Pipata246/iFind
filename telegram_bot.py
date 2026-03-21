@@ -169,6 +169,7 @@ def format_settings_for_user(settings: dict):
     f"• Состояние: {_format_list(settings.get('condition'))}\n"
     f"• Продавцы: {'-' if not settings.get('seller_type') or settings.get('seller_type') == 'all' else settings.get('seller_type')}\n"
     f"• Только 4 звезды и выше: {'да' if settings.get('rating_4_plus') is True else '-'}\n"
+    f"• WB только сегодняшние: {'да' if settings.get('wb_today_only') is True else '-'}\n"
     f"• Точность парсинга: {settings.get('precision') or '-'}"
   )
 
@@ -393,6 +394,7 @@ def upsert_user_settings(client: Client, telegram_id: int, settings: dict):
     # NULL/None = "значение по умолчанию" (фильтр не применяется)
     "seller_type": settings.get("seller_type"),
     "rating_4_plus": settings.get("rating_4_plus"),
+    "wb_today_only": bool(settings.get("wb_today_only")),
     "precision": settings.get("precision") or 7,
     "updated_at": now_iso,
   }
@@ -494,6 +496,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
           "condition": [],
           "seller_type": None,
           "rating_4_plus": None,
+          "wb_today_only": False,
           "precision": 7,
         }
       else:
@@ -963,6 +966,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
           "condition": base.get("condition") or [],
           "seller_type": base.get("seller_type"),
           "rating_4_plus": base.get("rating_4_plus"),
+          "wb_today_only": bool(base.get("wb_today_only")),
           "precision": int(base.get("precision") or 7),
         }
         context.user_data.pop("manual", None)
