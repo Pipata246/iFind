@@ -223,10 +223,17 @@ def _click_text_option(driver, text, must_be_checkbox=False):
       norm_elem = _norm(elem_text).replace("gb", "гб")
       if not norm_elem:
         continue
+      target_digits = re.sub(r"\D", "", normalized_target)
+      elem_digits = re.sub(r"\D", "", norm_elem)
       if (
         norm_elem == normalized_target
         or normalized_target in norm_elem
         or (len(norm_elem) > 3 and norm_elem in normalized_target)
+        or (
+          target_digits
+          and elem_digits == target_digits
+          and ("гб" in normalized_target or "gb" in normalized_target)
+        )
       ):
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", elem)
         sleep(0.2)
@@ -362,7 +369,10 @@ def _apply_avito_ui_filters(driver, filters):
 
   seller_type = (filters.get("seller_type") or "all").lower()
   seller_label = {"all": "Все", "private": "Частные", "company": "Компании"}.get(seller_type, "Все")
-  if _click_text_option(driver, seller_label, must_be_checkbox=False):
+  if seller_type == "all":
+    # "Все" обычно состояние по умолчанию; клик не обязателен.
+    applied["seller_type"] += 1
+  elif _click_text_option(driver, seller_label, must_be_checkbox=False):
     applied["seller_type"] += 1
   else:
     print(f"[AVITO] Не найден фильтр продавца: {seller_label}")
