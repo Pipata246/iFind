@@ -231,40 +231,23 @@ async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFA
     reply_markup=build_stop_keyboard(),
   )
 
-  def _sync():
+  def _sync_once():
     driver = None
     try:
       driver = build_driver(headless=True)
       context.user_data["active_parse"]["driver"] = driver
-      max_attempts = 3
-      retry_wait_sec = 130
-      items = []
-      for attempt in range(1, max_attempts + 1):
-        if stop_event.is_set():
-          return None
-        try:
-          items = parse_avito(
-            driver,
-            keyword,
-            model,
-            city,
-            price_min,
-            price_max,
-            precision=precision,
-            filters=filters,
-            stop_event=stop_event,
-            raise_on_block=True,
-          )
-          break
-        except Exception as e:
-          if isinstance(e, AvitoBlockedError) and attempt < max_attempts and not stop_event.is_set():
-            print(f"[AVITO] Retry {attempt}/{max_attempts}: жду {retry_wait_sec} сек до новой попытки...")
-            for _ in range(retry_wait_sec):
-              if stop_event.is_set():
-                return None
-              time.sleep(1)
-            continue
-          raise
+      items = parse_avito(
+        driver,
+        keyword,
+        model,
+        city,
+        price_min,
+        price_max,
+        precision=precision,
+        filters=filters,
+        stop_event=stop_event,
+        raise_on_block=True,
+      )
       if stop_event.is_set():
         return None
       filepath = export_to_excel(items, filename_prefix="parsing_avito")
@@ -279,8 +262,29 @@ async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFA
       except Exception:
         pass
 
+  max_attempts = 3
+  retry_wait_sec = 130
+  filepath = None
   try:
-    filepath = await asyncio.to_thread(_sync)
+    for attempt in range(1, max_attempts + 1):
+      if stop_event.is_set():
+        break
+      try:
+        filepath = await asyncio.to_thread(_sync_once)
+        break
+      except AvitoBlockedError:
+        if attempt >= max_attempts:
+          raise
+        await update.message.reply_text(
+          f"Avito ограничил доступ. Жду {retry_wait_sec} сек и пробую снова ({attempt + 1}/{max_attempts})…",
+          reply_markup=build_stop_keyboard(),
+        )
+        for _ in range(retry_wait_sec):
+          if stop_event.is_set():
+            break
+          await asyncio.sleep(1)
+        if stop_event.is_set():
+          break
   except Exception as e:
     context.user_data.pop("active_parse", None)
     if context.user_data.get("stop_notified"):
