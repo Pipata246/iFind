@@ -16,6 +16,7 @@ from config import (
   MOBILE_PROXY_PORT,
   MOBILE_PROXY_USER,
   USE_MOBILE_PROXY,
+  VPS_LIGHT_MODE,
 )
 from excel_export import export_to_excel
 from wb_parser import parse_wb
@@ -93,7 +94,16 @@ def build_driver(headless=True):
   chrome_options.add_argument("--disable-blink-features=AutomationControlled")
   chrome_options.add_argument("--no-sandbox")
   chrome_options.add_argument("--disable-dev-shm-usage")
-  chrome_options.add_argument("--window-size=1920,1080")
+  if VPS_LIGHT_MODE:
+    # Меньше памяти и нагрузки на 1 GB RAM VPS.
+    chrome_options.add_argument("--window-size=1280,720")
+    chrome_options.add_argument("--disable-extensions")
+    chrome_options.add_argument("--disable-background-networking")
+    chrome_options.add_argument("--disable-renderer-backgrounding")
+    chrome_options.add_argument("--disable-background-timer-throttling")
+    chrome_options.add_argument("--memory-pressure-off")
+  else:
+    chrome_options.add_argument("--window-size=1920,1080")
   chrome_options.add_argument("--disable-infobars")
   chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
   chrome_options.add_experimental_option("useAutomationExtension", False)

@@ -11,6 +11,14 @@ sudo apt install -y python3 python3-venv python3-pip unzip curl
 
 Install Chrome (or Chromium) and chromedriver.
 
+**1 GB RAM:** Chrome часто падает по нехватке памяти. Добавь swap (1–2 GB) и проверяй OOM:
+
+```bash
+sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+sudo dmesg -T | grep -i -E 'oom|killed process' | tail
+```
+
 ## 2) Setup project
 
 ```bash

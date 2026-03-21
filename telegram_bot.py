@@ -268,8 +268,18 @@ async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFA
     if context.user_data.get("stop_notified"):
       context.user_data.pop("stop_notified", None)
       return
+    err_text = str(e)
+    hint = ""
+    if any(
+      x in err_text
+      for x in ("Connection refused", "Errno 111", "Max retries exceeded", "Failed to establish a new connection")
+    ):
+      hint = (
+        "\n\nПодсказка: Chrome/драйвер оборвались (часто на 1 GB RAM — OOM). "
+        "На сервере: `sudo dmesg | grep -i oom` и добавь swap 1–2 GB."
+      )
     await update.message.reply_text(
-      f"Ошибка запуска парсинга: {e}",
+      f"Ошибка запуска парсинга: {e}{hint}",
       reply_markup=build_main_keyboard(),
     )
     return
