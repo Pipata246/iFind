@@ -945,13 +945,34 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await run_avito_parsing_and_store(update, context, settings)
         return
       if user_text == BTN_MANUAL_AVITO_MANUAL:
+        base = get_user_settings(supabase, telegram_id) or {}
+        if base.get("seller_type") == "all":
+          base["seller_type"] = None
+        if base.get("rating_4_plus") is not True:
+          base["rating_4_plus"] = None
+        draft = {
+          "keyword": base.get("keyword"),
+          "model": base.get("model"),
+          "city": base.get("city"),
+          "price_min": base.get("price_min"),
+          "price_max": base.get("price_max"),
+          "memory": normalize_capacity_values(base.get("memory") or []),
+          "ram": normalize_capacity_values(base.get("ram") or []),
+          "sim": base.get("sim") or [],
+          "colors": base.get("colors") or [],
+          "condition": base.get("condition") or [],
+          "seller_type": base.get("seller_type"),
+          "rating_4_plus": base.get("rating_4_plus"),
+          "precision": int(base.get("precision") or 7),
+        }
         context.user_data.pop("manual", None)
         context.user_data["after_wizard_action"] = "run_avito"
-        # Стартуем мастер настроек с нуля (без “Выберите площадку”)
+        # Стартуем мастер для разового запуска на базе текущих настроек пользователя.
+        # Поэтому '-' на шагах действительно означает "оставить текущее значение".
         context.user_data["wizard"] = {
           "persist_settings": False,
           "state": "keyword",
-          "draft": {"rating_4_plus": None, "seller_type": None, "precision": 7},
+          "draft": draft,
         }
         await update.message.reply_text(
           "Шаг 1/14. Введите Название (например: iPhone, Samsung).\n"

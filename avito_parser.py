@@ -611,6 +611,7 @@ def parse_avito(
   seen_item_keys = set()
   filtered_base_url = ""
   effective_max_pages = max_pages
+  fallback_without_ui_filters_done = False
 
   # Небольшая пауза перед первым запросом, чтобы не бить сайт сразу
   if page == 1:
@@ -705,6 +706,17 @@ def parse_avito(
       items = _parse_cards_from_html(driver)
       used_html_fallback = True
       if page == 1 and not items:
+        # Avito sometimes returns a broken/empty state after applying UI filters.
+        # Fallback: retry from base query without UI filters to avoid empty result runs.
+        if filters and not fallback_without_ui_filters_done:
+          print(
+            "[AVITO] После UI-фильтров карточки не найдены на странице 1. "
+            "Повторяю поиск без UI-фильтров как fallback."
+          )
+          fallback_without_ui_filters_done = True
+          filtered_base_url = ""
+          page = 1
+          continue
         print("[AVITO] Не удалось найти объявления ни селекторами, ни через HTML fallback.")
         break
       print(f"[AVITO] Страница {page}: fallback HTML, найдено {len(items)} карточек")

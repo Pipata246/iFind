@@ -40,6 +40,7 @@ def _build_cli():
   parser.add_argument("--headless", dest="headless", action="store_true", default=True)
   parser.add_argument("--no-headless", dest="headless", action="store_false")
   parser.add_argument("--wb-url", default="")
+  parser.add_argument("--wb-today-only", action="store_true", help="WB: keep only items marked as today")
   parser.add_argument("--output-prefix", default="")
 
   # Avito advanced filters for non-interactive VPS runs
@@ -208,6 +209,7 @@ def main():
         args.price_max,
         precision=args.precision,
         wb_url=args.wb_url or None,
+        wb_today_only=bool(args.wb_today_only),
       )
       all_items.extend(wb_items)
   finally:

@@ -165,12 +165,24 @@ def _parse_cards_bs(html):
                 href = link_tag.get("href", "")
                 url = f"https://www.wildberries.ru{href}" if href.startswith("/") else href
 
+            date_text = ""
+            date_candidates = article.find_all(
+                ["span", "div", "p"],
+                class_=lambda c: c and ("time" in c.lower() or "date" in c.lower()),
+            )
+            for d in date_candidates:
+                t = (d.get_text(" ", strip=True) or "").strip()
+                if t:
+                    date_text = t
+                    break
+
             items.append({
                 "platform": "wb",
                 "title": name,
                 "price": price,
                 "url": url,
                 "city": None,
+                "date_text": date_text or None,
             })
         except Exception:
             continue
@@ -178,7 +190,14 @@ def _parse_cards_bs(html):
     return items
 
 
-def parse_wb(driver, keyword, model, price_min=None, price_max=None, precision=7, wb_url=None):
+def _is_today_text(text):
+    s = (text or "").strip().lower()
+    if not s:
+        return False
+    return "сегодня" in s or "today" in s
+
+
+def parse_wb(driver, keyword, model, price_min=None, price_max=None, precision=7, wb_url=None, wb_today_only=False):
     params = _precision_params(precision)
     max_pages = params["max_pages"]
     scroll_passes = params["scroll_passes"]
@@ -300,6 +319,8 @@ def parse_wb(driver, keyword, model, price_min=None, price_max=None, precision=7
 
         added = 0
         for item in page_items:
+            if wb_today_only and not _is_today_text(item.get("date_text")):
+                continue
             key = (item.get("url") or "", item.get("title") or "")
             if key in seen_keys:
                 continue
