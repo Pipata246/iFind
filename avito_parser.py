@@ -185,7 +185,9 @@ def _click_text_option(driver, text, must_be_checkbox=False):
     xpaths.extend(
       [
         f"//label[.//*[normalize-space()='{variant}'] or normalize-space()='{variant}']",
+        f"//label[contains(normalize-space(), '{variant}')]",
         f"//*[self::span or self::div or self::button][normalize-space()='{variant}']",
+        f"//*[self::span or self::div or self::button][contains(normalize-space(), '{variant}')]",
       ]
     )
   for xpath in xpaths:
@@ -221,7 +223,11 @@ def _click_text_option(driver, text, must_be_checkbox=False):
       norm_elem = _norm(elem_text).replace("gb", "гб")
       if not norm_elem:
         continue
-      if norm_elem == normalized_target:
+      if (
+        norm_elem == normalized_target
+        or normalized_target in norm_elem
+        or (len(norm_elem) > 3 and norm_elem in normalized_target)
+      ):
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", elem)
         sleep(0.2)
         try:
@@ -299,6 +305,16 @@ def _apply_avito_ui_filters(driver, filters):
     return
 
   print("[AVITO] Применяю расширенные фильтры в интерфейсе…")
+  print(
+    "[AVITO] Запрошенные фильтры: "
+    f"memory={filters.get('memory') or []}, "
+    f"ram={filters.get('ram') or []}, "
+    f"sim={filters.get('sim') or []}, "
+    f"colors={filters.get('colors') or []}, "
+    f"condition={filters.get('condition') or []}, "
+    f"seller_type={filters.get('seller_type') or 'all'}, "
+    f"rating_4_plus={bool(filters.get('rating_4_plus'))}"
+  )
   applied = {
     "memory": 0,
     "ram": 0,
@@ -313,35 +329,49 @@ def _apply_avito_ui_filters(driver, filters):
     if _click_text_option(driver, value, must_be_checkbox=True):
       applied["memory"] += 1
       sleep(0.2)
+    else:
+      print(f"[AVITO] Не найден фильтр памяти: {value}")
 
   for value in filters.get("ram", []):
     if _click_text_option(driver, value, must_be_checkbox=True):
       applied["ram"] += 1
       sleep(0.2)
+    else:
+      print(f"[AVITO] Не найден фильтр RAM: {value}")
 
   for value in filters.get("sim", []):
     if _click_text_option(driver, value, must_be_checkbox=True):
       applied["sim"] += 1
       sleep(0.2)
+    else:
+      print(f"[AVITO] Не найден фильтр SIM: {value}")
 
   for value in filters.get("colors", []):
     if _click_text_option(driver, value, must_be_checkbox=True):
       applied["colors"] += 1
       sleep(0.2)
+    else:
+      print(f"[AVITO] Не найден фильтр цвета: {value}")
 
   for value in filters.get("condition", []):
     if _click_text_option(driver, value, must_be_checkbox=True):
       applied["condition"] += 1
       sleep(0.2)
+    else:
+      print(f"[AVITO] Не найден фильтр состояния: {value}")
 
   seller_type = (filters.get("seller_type") or "all").lower()
   seller_label = {"all": "Все", "private": "Частные", "company": "Компании"}.get(seller_type, "Все")
   if _click_text_option(driver, seller_label, must_be_checkbox=False):
     applied["seller_type"] += 1
+  else:
+    print(f"[AVITO] Не найден фильтр продавца: {seller_label}")
 
   if filters.get("rating_4_plus"):
     if _click_text_option(driver, "4 звезды и выше", must_be_checkbox=True):
       applied["rating_4_plus"] += 1
+    else:
+      print("[AVITO] Не найден фильтр рейтинга: 4 звезды и выше")
 
   # На Avito после выбора фильтров часто требуется кнопка "Показать N объявлений".
   clicked_show = _click_show_results_button(driver)
