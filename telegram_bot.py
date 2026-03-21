@@ -200,7 +200,7 @@ async def send_excel_files_from_supabase(update: Update, context: ContextTypes.D
 async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFAULT_TYPE, settings: dict):
   # Импортируем локально, чтобы не тянуть Selenium при старте бота
   from main import build_driver
-  from avito_parser import parse_avito
+  from avito_parser import AvitoBlockedError, parse_avito
   from excel_export import export_to_excel
 
   supabase: Client = context.bot_data.get("supabase_client")
@@ -236,17 +236,35 @@ async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFA
     try:
       driver = build_driver(headless=True)
       context.user_data["active_parse"]["driver"] = driver
-      items = parse_avito(
-        driver,
-        keyword,
-        model,
-        city,
-        price_min,
-        price_max,
-        precision=precision,
-        filters=filters,
-        stop_event=stop_event,
-      )
+      max_attempts = 3
+      retry_wait_sec = 130
+      items = []
+      for attempt in range(1, max_attempts + 1):
+        if stop_event.is_set():
+          return None
+        try:
+          items = parse_avito(
+            driver,
+            keyword,
+            model,
+            city,
+            price_min,
+            price_max,
+            precision=precision,
+            filters=filters,
+            stop_event=stop_event,
+            raise_on_block=True,
+          )
+          break
+        except Exception as e:
+          if isinstance(e, AvitoBlockedError) and attempt < max_attempts and not stop_event.is_set():
+            print(f"[AVITO] Retry {attempt}/{max_attempts}: жду {retry_wait_sec} сек до новой попытки...")
+            for _ in range(retry_wait_sec):
+              if stop_event.is_set():
+                return None
+              time.sleep(1)
+            continue
+          raise
       if stop_event.is_set():
         return None
       filepath = export_to_excel(items, filename_prefix="parsing_avito")

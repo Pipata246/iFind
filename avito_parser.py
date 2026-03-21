@@ -13,6 +13,10 @@ from selenium.webdriver.support.ui import WebDriverWait
 from config import AVITO_BASE_URL, EXPLICIT_WAIT, VPS_LIGHT_MODE
 
 
+class AvitoBlockedError(RuntimeError):
+  pass
+
+
 def _filters_to_excel_meta(filters):
   filters = filters or {}
   return {
@@ -502,7 +506,18 @@ def _parse_cards_to_items(cards, city, price_min, price_max):
   return items, stats
 
 
-def parse_avito(driver, keyword, model, city, price_min, price_max, precision=7, filters=None, stop_event=None):
+def parse_avito(
+  driver,
+  keyword,
+  model,
+  city,
+  price_min,
+  price_max,
+  precision=7,
+  filters=None,
+  stop_event=None,
+  raise_on_block=False,
+):
   """Поэтапно: одна страница → пауза → скролл по шагам → сбор → длинная пауза → следующая страница."""
   params = _precision_params(precision)
   max_pages = params["max_pages"]
@@ -574,10 +589,13 @@ def parse_avito(driver, keyword, model, city, price_min, price_max, precision=7,
 
     blocked, reason = _is_avito_blocked(driver)
     if blocked:
-      print(
+      msg = (
         f"[AVITO] Обнаружена блокировка/проверка ({reason}). "
         "Подождите 30–60 мин или смените IP/прокси."
       )
+      print(msg)
+      if raise_on_block:
+        raise AvitoBlockedError(msg)
       break
 
     wait = WebDriverWait(driver, EXPLICIT_WAIT)
