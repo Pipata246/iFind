@@ -57,6 +57,45 @@ using (true)
 with check (true);
 ----------------------------------
 
+-- Одна строка на пользователя: настройки именно ручного запуска + флаг «только сегодня»
+create table if not exists public.bot_manual_settings (
+  telegram_id bigint primary key,
+  platform text not null default 'avito',
+
+  keyword text,
+  model text,
+  city text,
+
+  price_min integer,
+  price_max integer,
+
+  memory text[] default '{}',
+  ram text[] default '{}',
+  sim text[] default '{}',
+  colors text[] default '{}',
+  condition text[] default '{}',
+
+  seller_type text default 'all',
+  rating_4_plus boolean default false,
+  precision integer default 7,
+
+  today_only boolean default false,
+
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+alter table public.bot_manual_settings enable row level security;
+
+create policy "anon can upsert bot_manual_settings"
+on public.bot_manual_settings
+for all
+to anon
+using (true)
+with check (true);
+
+----------------------------------
+
 --таблица exel файлов пользователей
 create table if not exists public.bot_excel_files (
   id bigserial primary key,

@@ -18,6 +18,7 @@ SUPABASE_URL = "https://jfydcvornxzwuzjexiqb.supabase.co"
 SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpmeWRjdm9ybnh6d3V6amV4aXFiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM3NTM1MTgsImV4cCI6MjA4OTMyOTUxOH0.XmagPVxGHkAYqr_hSSlSrQ4nubOaTCUZlyzT0FbUgo4"
 SUPABASE_USERS_TABLE = "bot_users"
 SUPABASE_SETTINGS_TABLE = "bot_settings"
+SUPABASE_MANUAL_SETTINGS_TABLE = "bot_manual_settings"
 SUPABASE_EXCEL_FILES_TABLE = "bot_excel_files"
 
 BTN_MANUAL_RUN = "🚀 Ручной запуск"
@@ -31,7 +32,7 @@ BTN_EDIT = "Изменить"
 BTN_MANUAL_AVITO_MY = "✅ Парсинг с моими настройками"
 BTN_MANUAL_AVITO_MANUAL = "✍️ Задать вручную"
 BTN_STOP_PARSING = "⛔ Остановить парсинг"
-# Только на время одного запуска (не сохраняется в БД)
+# Выбор сохраняется в bot_manual_settings (колонка today_only)
 BTN_PARSE_SCOPE_TODAY = "📅 Только сегодняшние объявления"
 BTN_PARSE_SCOPE_ALL = "📋 Все объявления"
 
@@ -255,9 +256,9 @@ async def send_excel_files_from_supabase(update: Update, context: ContextTypes.D
       print(f"[Supabase] Ошибка отправки файла: {e}")
 
 
-async def ask_parse_scope_before_run(update: Update, context: ContextTypes.DEFAULT_TYPE, settings: dict):
-  """Перед запуском спрашиваем: только сегодня или все (только в памяти процесса, не в БД)."""
-  context.user_data["awaiting_parse_scope"] = {"settings": dict(settings)}
+async def ask_parse_scope_before_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
+  """После сохранения строки в bot_manual_settings спрашиваем «сегодня / все» и пишем в колонку today_only."""
+  context.user_data["awaiting_parse_scope"] = True
   await update.message.reply_text(
     "Какие объявления собрать в этом запуске?\n"
     f"• «{BTN_PARSE_SCOPE_TODAY}» — на карточке должна быть дата «сегодня» или «N часов/минут назад».\n"
@@ -266,9 +267,7 @@ async def ask_parse_scope_before_run(update: Update, context: ContextTypes.DEFAU
   )
 
 
-async def run_avito_parsing_and_store(
-  update: Update, context: ContextTypes.DEFAULT_TYPE, settings: dict, today_only: bool = False
-):
+async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFAULT_TYPE):
   # Импортируем локально, чтобы не тянуть Selenium при старте бота
   from main import build_driver
   from avito_parser import AvitoBlockedError, parse_avito
@@ -277,12 +276,21 @@ async def run_avito_parsing_and_store(
   supabase: Client = context.bot_data.get("supabase_client")
   telegram_id = update.effective_user.id
 
+  settings = get_manual_settings(supabase, telegram_id)
+  if not settings:
+    await update.message.reply_text(
+      "Нет настроек ручного запуска в базе. Сначала задайте их в мастере или нажмите «с моими настройками».",
+      reply_markup=build_main_keyboard(),
+    )
+    return
+
   keyword = settings.get("keyword")
   model = settings.get("model")
   city = settings.get("city")
   price_min = settings.get("price_min")
   price_max = settings.get("price_max")
   precision = settings.get("precision") or 7
+  today_only = bool(settings.get("today_only"))
 
   filters = {
     "memory": normalize_capacity_values(settings.get("memory") or []),
@@ -463,6 +471,82 @@ def upsert_user_settings(client: Client, telegram_id: int, settings: dict):
   return client.table(SUPABASE_SETTINGS_TABLE).upsert(payload, on_conflict="telegram_id").execute()
 
 
+def get_manual_settings(client: Client, telegram_id: int):
+  try:
+    res = (
+      client.table(SUPABASE_MANUAL_SETTINGS_TABLE)
+      .select("*")
+      .eq("telegram_id", telegram_id)
+      .maybe_single()
+      .execute()
+    )
+    return res.data
+  except Exception as e:
+    print(f"[Supabase] Ошибка get_manual_settings: {e}")
+    return None
+
+
+def bot_settings_to_manual_dict(bot: dict) -> dict:
+  """Копия настроек автопарсинга для строки ручного запуска (без today_only)."""
+  if not bot:
+    return {}
+  return {
+    "keyword": bot.get("keyword"),
+    "model": bot.get("model"),
+    "city": bot.get("city"),
+    "price_min": bot.get("price_min"),
+    "price_max": bot.get("price_max"),
+    "memory": normalize_capacity_values(bot.get("memory") or []),
+    "ram": normalize_capacity_values(bot.get("ram") or []),
+    "sim": bot.get("sim") or [],
+    "colors": bot.get("colors") or [],
+    "condition": bot.get("condition") or [],
+    "seller_type": bot.get("seller_type"),
+    "rating_4_plus": bot.get("rating_4_plus"),
+    "precision": int(bot.get("precision") or 7),
+  }
+
+
+def upsert_manual_settings(client: Client, telegram_id: int, settings: dict, today_only=None):
+  """Одна строка на пользователя: полный upsert настроек ручного запуска."""
+  now_iso = datetime.now(timezone.utc).isoformat()
+  if today_only is not None:
+    t = bool(today_only)
+  else:
+    t = bool(settings.get("today_only"))
+  payload = {
+    "telegram_id": telegram_id,
+    "platform": "avito",
+    "keyword": settings.get("keyword"),
+    "model": settings.get("model"),
+    "city": settings.get("city"),
+    "price_min": settings.get("price_min"),
+    "price_max": settings.get("price_max"),
+    "memory": normalize_capacity_values(settings.get("memory") or []),
+    "ram": normalize_capacity_values(settings.get("ram") or []),
+    "sim": settings.get("sim") or [],
+    "colors": settings.get("colors") or [],
+    "condition": settings.get("condition") or [],
+    "seller_type": settings.get("seller_type"),
+    "rating_4_plus": settings.get("rating_4_plus"),
+    "precision": int(settings.get("precision") or 7),
+    "today_only": t,
+    "updated_at": now_iso,
+  }
+  return client.table(SUPABASE_MANUAL_SETTINGS_TABLE).upsert(payload, on_conflict="telegram_id").execute()
+
+
+def set_manual_today_only(client: Client, telegram_id: int, today_only: bool):
+  """Обновить только флаг today_only в сохранённой строке ручного запуска."""
+  now_iso = datetime.now(timezone.utc).isoformat()
+  return (
+    client.table(SUPABASE_MANUAL_SETTINGS_TABLE)
+    .update({"today_only": bool(today_only), "updated_at": now_iso})
+    .eq("telegram_id", telegram_id)
+    .execute()
+  )
+
+
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
   try:
     supabase: Client = context.bot_data["supabase_client"]
@@ -517,22 +601,43 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return
 
-  # Выбор «только сегодня / все» перед одним запуском парсинга (не хранится в БД)
-  pending_scope = context.user_data.get("awaiting_parse_scope")
-  if pending_scope:
+  # Выбор «только сегодня / все» → колонка today_only в bot_manual_settings, затем парсинг по этой таблице
+  if context.user_data.get("awaiting_parse_scope"):
+    supabase: Client = context.bot_data.get("supabase_client")
+    telegram_id = update.effective_user.id
     if user_text == BTN_CANCEL:
       context.user_data.pop("awaiting_parse_scope", None)
       await update.message.reply_text("Запуск парсинга отменён.", reply_markup=build_main_keyboard())
       return
     if user_text == BTN_PARSE_SCOPE_TODAY:
-      settings = pending_scope.get("settings") or {}
       context.user_data.pop("awaiting_parse_scope", None)
-      await run_avito_parsing_and_store(update, context, settings, today_only=True)
+      if not get_manual_settings(supabase, telegram_id):
+        await update.message.reply_text(
+          "Нет сохранённых настроек ручного запуска.",
+          reply_markup=build_main_keyboard(),
+        )
+        return
+      try:
+        set_manual_today_only(supabase, telegram_id, True)
+      except Exception as e:
+        await update.message.reply_text(f"Ошибка сохранения в Supabase: {e}", reply_markup=build_main_keyboard())
+        return
+      await run_avito_parsing_and_store(update, context)
       return
     if user_text == BTN_PARSE_SCOPE_ALL:
-      settings = pending_scope.get("settings") or {}
       context.user_data.pop("awaiting_parse_scope", None)
-      await run_avito_parsing_and_store(update, context, settings, today_only=False)
+      if not get_manual_settings(supabase, telegram_id):
+        await update.message.reply_text(
+          "Нет сохранённых настроек ручного запуска.",
+          reply_markup=build_main_keyboard(),
+        )
+        return
+      try:
+        set_manual_today_only(supabase, telegram_id, False)
+      except Exception as e:
+        await update.message.reply_text(f"Ошибка сохранения в Supabase: {e}", reply_markup=build_main_keyboard())
+        return
+      await run_avito_parsing_and_store(update, context)
       return
     await update.message.reply_text(
       f"Нажмите «{BTN_PARSE_SCOPE_TODAY}», «{BTN_PARSE_SCOPE_ALL}» или «{BTN_CANCEL}».",
@@ -944,10 +1049,18 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
           reply_markup=build_main_keyboard(),
         )
         context.user_data.pop("wizard", None)
-        # Если настройка была запрошена из ручного режима — запускаем парсинг сразу.
+        # Если настройка была запрошена из ручного режима — сохраняем в bot_manual_settings и спрашиваем «сегодня».
         if context.user_data.get("after_wizard_action") == "run_avito":
           context.user_data.pop("after_wizard_action", None)
-          await ask_parse_scope_before_run(update, context, draft)
+          try:
+            upsert_manual_settings(supabase, telegram_id, draft, today_only=False)
+          except Exception as e:
+            await update.message.reply_text(
+              f"Ошибка сохранения настроек ручного запуска: {e}",
+              reply_markup=build_main_keyboard(),
+            )
+            return
+          await ask_parse_scope_before_run(update, context)
           return
         return
       try:
@@ -978,10 +1091,18 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
       )
       context.user_data.pop("wizard", None)
 
-      # Если настройка была запрошена из ручного режима — запускаем парсинг сразу.
+      # Если настройка была запрошена из ручного режима — сохраняем в bot_manual_settings и спрашиваем «сегодня».
       if context.user_data.get("after_wizard_action") == "run_avito":
         context.user_data.pop("after_wizard_action", None)
-        await ask_parse_scope_before_run(update, context, draft)
+        try:
+          upsert_manual_settings(supabase, telegram_id, draft, today_only=False)
+        except Exception as e:
+          await update.message.reply_text(
+            f"Ошибка сохранения настроек ручного запуска: {e}",
+            reply_markup=build_main_keyboard(),
+          )
+          return
+        await ask_parse_scope_before_run(update, context)
         return
 
       return
@@ -1028,8 +1149,17 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=build_manual_avito_keyboard(),
           )
           return
+        manual_src = bot_settings_to_manual_dict(settings)
+        try:
+          upsert_manual_settings(supabase, telegram_id, manual_src, today_only=False)
+        except Exception as e:
+          await update.message.reply_text(
+            f"Ошибка сохранения настроек ручного запуска: {e}",
+            reply_markup=build_manual_avito_keyboard(),
+          )
+          return
         context.user_data.pop("manual", None)
-        await ask_parse_scope_before_run(update, context, settings)
+        await ask_parse_scope_before_run(update, context)
         return
       if user_text == BTN_MANUAL_AVITO_MANUAL:
         base = get_user_settings(supabase, telegram_id) or {}
