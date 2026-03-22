@@ -997,6 +997,133 @@ def _click_show_results_button(driver):
   return False
 
 
+def _log_avito_filters_diagnostics(driver, phase: str):
+  """Почему не кликаются фильтры: снимок DOM (без body.text — быстро)."""
+  try:
+    payload = driver.execute_script(
+      r"""
+      try {
+        var aside = document.querySelector("aside");
+        var dm = document.querySelectorAll("[data-marker]");
+        var dmF = 0;
+        for (var i = 0; i < dm.length; i++) {
+          var m = (dm[i].getAttribute("data-marker") || "");
+          if (m.indexOf("filter") !== -1 || m.indexOf("params") !== -1) dmF++;
+        }
+        var inAside = function(sel) {
+          if (!aside) return 0;
+          return aside.querySelectorAll(sel).length;
+        };
+        var samples = [];
+        if (aside) {
+          aside.querySelectorAll("label, span, button, div[role], a").forEach(function(el){
+            if (samples.length >= 12) return;
+            var t = (el.innerText || "").replace(/\s+/g, " ").trim();
+            if (!t || t.length > 90) return;
+            if (/гб|gb|sim|сим|цвет|рейтинг|звезд|память|встроен/i.test(t)) samples.push(t.slice(0, 72));
+          });
+        }
+        var ifr = document.querySelectorAll("iframe").length;
+        return JSON.stringify({
+          phase: arguments[0],
+          innerW: window.innerWidth,
+          innerH: window.innerHeight,
+          url: String(location.href || "").slice(0, 220),
+          aside: !!aside,
+          asideLabels: inAside("label"),
+          dataMarkerFilterish: dmF,
+          iframeCount: ifr,
+          samples: samples
+        });
+      } catch (e) {
+        return JSON.stringify({ phase: arguments[0], error: String(e) });
+      }
+      """,
+      phase,
+    )
+  except Exception as e:
+    print(f"[AVITO][diag:{phase}] execute_script failed: {e}")
+    return
+  print(f"[AVITO][diag:{phase}] {payload}")
+
+
+def _try_open_avito_filters_drawer(driver):
+  """На части вёрсток колонка фильтров скрыта за кнопкой «Фильтры» / data-marker."""
+  for css in (
+    "button[aria-label*='Фильтр']",
+    "button[aria-label*='фильтр']",
+    "[data-marker*='open-filter']",
+    "[data-marker*='filters-button']",
+    "[data-marker='catalog-filters']",
+    "button[data-marker*='filter']",
+    "[data-marker*='Filters']",
+  ):
+    try:
+      for el in driver.find_elements(By.CSS_SELECTOR, css)[:8]:
+        try:
+          if el.is_displayed():
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+            sleep(0.12)
+            driver.execute_script("arguments[0].click();", el)
+            sleep(1.0)
+            print(f"[AVITO] Открытие панели: клик по селектору {css!r}")
+            return True
+        except Exception:
+          continue
+    except Exception:
+      continue
+  clicked = False
+  try:
+    clicked = bool(
+      driver.execute_script(
+        """
+        var labels = ["Фильтры", "Все фильтры", "Параметры", "Подобрать", "Настроить поиск", "Фильтр"];
+        var nodes = document.querySelectorAll("button, a, [role='button'], span, div");
+        for (var i = 0; i < nodes.length; i++) {
+          var el = nodes[i];
+          var t = (el.innerText || "").replace(/\\s+/g, " ").trim();
+          if (!t || t.length > 48) continue;
+          for (var j = 0; j < labels.length; j++) {
+            if (t === labels[j] || t.indexOf(labels[j]) === 0) {
+              var r = el.getBoundingClientRect();
+              if (r.width < 2 || r.height < 2) continue;
+              try { el.click(); return true; } catch (e1) {}
+              try {
+                el.dispatchEvent(new MouseEvent("click", {bubbles: true, cancelable: true, view: window}));
+                return true;
+              } catch (e2) {}
+            }
+          }
+        }
+        return false;
+        """
+      )
+    )
+  except Exception:
+    clicked = False
+  if clicked:
+    sleep(1.0)
+    print("[AVITO] Открытие панели: клик по кнопке «Фильтры»/«Параметры»/… (по тексту)")
+  return clicked
+
+
+def _scroll_aside_filters_deep(driver):
+  """Прокрутка aside — опции памяти/SIM часто подгружаются только после скролла."""
+  try:
+    driver.execute_script(
+      """
+      var aside = document.querySelector("aside");
+      if (!aside) return;
+      for (var i = 0; i < 30; i++) {
+        aside.scrollTop += 280;
+      }
+      """
+    )
+    sleep(0.45)
+  except Exception:
+    pass
+
+
 def _build_page_url(base_url, page):
   if not base_url:
     return ""
@@ -1089,6 +1216,10 @@ def _apply_avito_ui_filters(driver, filters):
     f"rating_4_plus={bool(filters.get('rating_4_plus'))}"
   )
 
+  _log_avito_filters_diagnostics(driver, "before_drawer")
+  _try_open_avito_filters_drawer(driver)
+  _log_avito_filters_diagnostics(driver, "after_drawer")
+
   # Дождаться отрисовки и прокрутить к колонке фильтров (левый aside)
   sleep(1.8)
   try:
@@ -1107,6 +1238,8 @@ def _apply_avito_ui_filters(driver, filters):
   _js_expand_collapsed_filters(driver)
   sleep(0.45)
   _try_expand_filter_sections(driver, filters)
+  _scroll_aside_filters_deep(driver)
+  _log_avito_filters_diagnostics(driver, "after_expand")
   applied = {
     "memory": 0,
     "ram": 0,
@@ -1197,6 +1330,16 @@ def _apply_avito_ui_filters(driver, filters):
     f"condition={applied['condition']}, seller={applied['seller_type']}, "
     f"rating4+={applied['rating_4_plus']}"
   )
+  _log_avito_filters_diagnostics(driver, "after_filter_clicks")
+  if (
+    applied["memory"] + applied["ram"] + applied["sim"] + applied["colors"]
+    + applied["condition"] + applied["rating_4_plus"] == 0
+    and _has_meaningful_avito_ui_filters(filters)
+  ):
+    print(
+      "[AVITO] Подсказка: смотрите JSON выше — если aside=false или samples=[], "
+      "фильтры в DOM не видны (другая вёрстка/модалка/iframe). Проверьте окно браузера и прокси."
+    )
   return applied
 
 
@@ -1636,4 +1779,10 @@ def parse_avito(
     item.update(final_meta)
 
   print(f"[AVITO] Всего объявлений (с повторами): {len(all_items)}")
+  if not all_items:
+    print(
+      "[AVITO] ⚠ Итог 0 объявлений. Частые причины: блокировка Avito, режим «только сегодня» "
+      "(today_only), пустая выдача по запросу, обрыв после пустой страницы. "
+      "Смотрите также [AVITO][diag:*] в логах при применении фильтров."
+    )
   return all_items
