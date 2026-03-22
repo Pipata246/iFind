@@ -1539,32 +1539,85 @@ def _normalize_avito_item_href(href: str) -> str:
   return h.split("?")[0].rstrip("/")
 
 
-def _get_cards(driver, wait):
-  """Карточки = одна ссылка item-title → один контейнер. Иначе [data-marker=item] даёт 2× узлов и «50 вместо 25»."""
-  cards = []
+def _avito_item_numeric_id(href: str):
+  """ID объявления в конце пути (для дедупа при разных query/path)."""
   try:
-    wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "a[data-marker='item-title']")))
+    path = urlparse(href).path
+  except Exception:
+    return None
+  m = re.search(r"-(\d{8,})\s*$", path)
+  return m.group(1) if m else None
+
+
+def _collect_cards_from_title_links(driver, title_links, *, source: str):
+  """Собрать корневые карточки из ссылок заголовков с дедупом по URL и по числовому id."""
+  cards = []
+  seen_key = set()
+  seen_ids = set()
+  for link in title_links[:220]:
+    try:
+      raw_href = link.get_attribute("href") or ""
+      href = _normalize_avito_item_href(raw_href)
+      if not href:
+        continue
+      nid = _avito_item_numeric_id(href)
+      if nid and nid in seen_ids:
+        continue
+      key = href.lower()
+      if key in seen_key:
+        continue
+      seen_key.add(key)
+      if nid:
+        seen_ids.add(nid)
+      try:
+        card = link.find_element(By.XPATH, "./ancestor::*[@data-marker='item'][1]")
+      except Exception:
+        card = link.find_element(By.XPATH, "./ancestor::div[contains(@class,'iva-item-root')][1]")
+      cards.append(card)
+    except Exception:
+      continue
+  if cards:
+    print(f"[AVITO] Карточек из ленты ({source}): {len(cards)} уникальных объявлений.")
+  return cards
+
+
+def _get_cards(driver, wait):
+  """Только основная выдача: item-title вне catalog-serp — рекомендации/виджеты (лишние 25 ссылок)."""
+  cards = []
+  serp_selectors = (
+    "[data-marker='catalog-serp'] a[data-marker='item-title']",
+    "[data-marker='items'] a[data-marker='item-title']",
+    "[data-marker='items-list'] a[data-marker='item-title']",
+    "div[class*='items-items'] a[data-marker='item-title']",
+  )
+
+  try:
+    wait.until(
+      EC.presence_of_element_located(
+        (By.CSS_SELECTOR, "[data-marker='catalog-serp'] a[data-marker='item-title'], a[data-marker='item-title']")
+      )
+    )
   except Exception:
     pass
-  try:
-    title_links = driver.find_elements(By.CSS_SELECTOR, "a[data-marker='item-title']")
-    seen_key = set()
-    for link in title_links[:200]:
-      try:
-        href = _normalize_avito_item_href(link.get_attribute("href") or "")
-        if not href:
-          continue
-        key = href.lower()
-        if key in seen_key:
-          continue
-        seen_key.add(key)
-        try:
-          card = link.find_element(By.XPATH, "./ancestor::*[@data-marker='item'][1]")
-        except Exception:
-          card = link.find_element(By.XPATH, "./ancestor::div[contains(@class,'iva-item-root')][1]")
-        cards.append(card)
-      except Exception:
+
+  for sel in serp_selectors:
+    try:
+      title_links = driver.find_elements(By.CSS_SELECTOR, sel)
+      if len(title_links) < 1:
         continue
+      cards = _collect_cards_from_title_links(driver, title_links, source=f"селектор {sel!r}")
+      if cards:
+        return cards
+    except Exception:
+      continue
+
+  try:
+    print(
+      "[AVITO] В контейнере выдачи мало ссылок — fallback по всей странице "
+      "(возможны лишние карточки из рекомендаций)."
+    )
+    title_links = driver.find_elements(By.CSS_SELECTOR, "a[data-marker='item-title']")
+    cards = _collect_cards_from_title_links(driver, title_links, source="вся страница (fallback)")
     if cards:
       return cards
   except Exception:
@@ -1963,7 +2016,9 @@ def parse_avito(
         fb = filtered_base_url or ""
         has_f = "f=" in fb or "&f=" in fb or "?f=" in fb
         if has_f and _has_meaningful_avito_ui_filters(filters or {}):
-          nt = len(driver.find_elements(By.CSS_SELECTOR, "a[data-marker='item-title']"))
+          nt = len(driver.find_elements(By.CSS_SELECTOR, "[data-marker='catalog-serp'] a[data-marker='item-title']"))
+          if nt < 1:
+            nt = len(driver.find_elements(By.CSS_SELECTOR, "a[data-marker='item-title']"))
           if 0 < nt < 50:
             old_dp = detected_pages
             detected_pages = min(detected_pages, 1)
