@@ -339,9 +339,13 @@ def _filter_search_roots(driver):
   roots = []
   for sel in (
     "aside",
+    "[role='complementary']",
     "[data-marker*='filter']",
     "[class*='SearchFilters']",
     "[class*='search-filters']",
+    "[class*='serp-filters']",
+    "[class*='styles-module-sidebar']",
+    "[class*='Sidebar']",
     "[class*='Filter']",
   ):
     try:
@@ -379,10 +383,14 @@ def _quick_filter_clickables(driver, deadline=None):
     "aside button",
     "aside span",
     "aside div[role]",
+    "[role='complementary'] label",
+    "[role='complementary'] span",
+    "[role='complementary'] button",
+    "[class*='serp-filters'] label",
+    "[class*='SearchFilters'] label",
     "[data-marker*='filter'] label",
     "[data-marker*='filter'] span",
     "[data-marker*='filter'] button",
-    "[class*='SearchFilters'] label",
     "[class*='SearchFilters'] span",
     "[class*='SearchFilters'] button",
     "[class*='search-filters'] label",
@@ -419,7 +427,12 @@ def _js_expand_collapsed_filters(driver):
         var roots = [];
         var a = document.querySelector('aside');
         if (a) roots.push(a);
+        document.querySelectorAll('[role="complementary"]').forEach(function(n){ roots.push(n); });
         document.querySelectorAll('[data-marker*="filter"],[data-marker*="params"]').forEach(function(n){ roots.push(n); });
+        document.querySelectorAll('div[class],section[class]').forEach(function(n){
+          var c = (n.className && n.className.toString()) || '';
+          if (/sidebar|filters|serp-filters|catalog-filters|search-filters/i.test(c)) roots.push(n);
+        });
         roots.forEach(function(root){
           if (!root) return;
           root.querySelectorAll('[aria-expanded="false"]').forEach(function(el){
@@ -434,6 +447,32 @@ def _js_expand_collapsed_filters(driver):
     )
   except Exception:
     pass
+
+
+def _click_show_more_filter_options(driver, max_clicks=8):
+  """На скринште Avito: «128 ГБ» под ссылкой «Показать ещё» — без клика чекбокса в DOM нет."""
+  for _ in range(max_clicks):
+    try:
+      clicked = driver.execute_script(
+        """
+        var nodes = document.querySelectorAll('a,button,span,div[role="button"]');
+        for (var i = 0; i < nodes.length; i++) {
+          var t = (nodes[i].innerText || '').replace(/\\s+/g, ' ').trim();
+          if (t !== 'Показать ещё' && t.indexOf('Показать ещё') !== 0) continue;
+          var r = nodes[i].getBoundingClientRect();
+          if (r.width < 2 || r.height < 2) continue;
+          if (r.left > window.innerWidth * 0.55) continue;
+          try { nodes[i].click(); return true; } catch (e1) {}
+        }
+        return false;
+        """
+      )
+    except Exception:
+      clicked = False
+    if not clicked:
+      break
+    sleep(0.45)
+  sleep(0.25)
 
 
 def _js_click_filter_option(driver, raw_text: str, mode: str) -> bool:
@@ -465,7 +504,17 @@ def _js_click_filter_option(driver, raw_text: str, mode: str) -> bool:
           }
           var aside = document.querySelector('aside');
           if (aside) add(aside);
+          document.querySelectorAll('[role="complementary"]').forEach(add);
           document.querySelectorAll('[data-marker*="filter"],[data-marker*="params"],[class*="SearchFilters"],[class*="search-filters"],[class*="styles-module-sidebar"]').forEach(add);
+          // Новая вёрстка: колонка фильтров — div с Sidebar/sidebar/filters в class (без <aside> и без data-marker*=filter)
+          document.querySelectorAll('div[class],section[class]').forEach(function(n){
+            var c = (n.className && n.className.toString()) || '';
+            if (!/sidebar|filters|serp-filters|catalog-filters|search-filters/i.test(c)) return;
+            try {
+              var b = n.getBoundingClientRect();
+              if (b.left < window.innerWidth * 0.52 && b.width > 70 && b.height > 100) add(n);
+            } catch (e2) {}
+          });
           if (list.length === 0) {
             document.querySelectorAll('section,div').forEach(function(n){
               var dm = n.getAttribute('data-marker') || '';
@@ -477,9 +526,14 @@ def _js_click_filter_option(driver, raw_text: str, mode: str) -> bool:
         function inFilterColumn(el){
           if (!el || !el.getBoundingClientRect) return false;
           if (document.querySelector('aside') && document.querySelector('aside').contains(el)) return true;
+          var p = el;
+          for (var d = 0; d < 14 && p; d++) {
+            var cls = (p.className && p.className.toString()) || '';
+            if (/sidebar|filters|serp-filters|catalog-filters|search-filters/i.test(cls)) return true;
+            p = p.parentElement;
+          }
           var r = el.getBoundingClientRect();
           if (r.width < 2 || r.height < 2) return false;
-          // Раньше было 44%/52% — на новой вёрстке колонка фильтров шире; узлы отсекались → «не найден фильтр».
           return r.left < window.innerWidth * 0.78;
         }
         function clickSmart(el){
@@ -1024,12 +1078,20 @@ def _log_avito_filters_diagnostics(driver, phase: str):
           });
         }
         var ifr = document.querySelectorAll("iframe").length;
+        var sb = 0;
+        document.querySelectorAll("div[class],section[class]").forEach(function(n){
+          var c = (n.className && n.className.toString()) || "";
+          if (/sidebar|filters|serp-filters|catalog-filters|search-filters/i.test(c)) sb++;
+        });
+        var comp = document.querySelectorAll("[role='complementary']").length;
         return JSON.stringify({
           phase: arguments[0],
           innerW: window.innerWidth,
           innerH: window.innerHeight,
           url: String(location.href || "").slice(0, 220),
           aside: !!aside,
+          complementary: comp,
+          classSidebarLike: sb,
           asideLabels: inAside("label"),
           dataMarkerFilterish: dmF,
           iframeCount: ifr,
@@ -1108,15 +1170,26 @@ def _try_open_avito_filters_drawer(driver):
 
 
 def _scroll_aside_filters_deep(driver):
-  """Прокрутка aside — опции памяти/SIM часто подгружаются только после скролла."""
+  """Прокрутка колонки фильтров (aside или div.sidebar) — опции подгружаются после скролла."""
   try:
     driver.execute_script(
       """
-      var aside = document.querySelector("aside");
-      if (!aside) return;
-      for (var i = 0; i < 30; i++) {
-        aside.scrollTop += 280;
+      function scrollEl(el){
+        if (!el) return;
+        for (var i = 0; i < 30; i++) { el.scrollTop += 280; }
       }
+      var aside = document.querySelector("aside");
+      scrollEl(aside);
+      document.querySelectorAll("[role='complementary']").forEach(scrollEl);
+      document.querySelectorAll("div[class],section[class]").forEach(function(n){
+        var c = (n.className && n.className.toString()) || "";
+        if (/sidebar|filters|serp-filters|catalog-filters|search-filters/i.test(c)) {
+          try {
+            var b = n.getBoundingClientRect();
+            if (b.left < window.innerWidth * 0.52 && b.width > 60) scrollEl(n);
+          } catch (e) {}
+        }
+      });
       """
     )
     sleep(0.45)
@@ -1238,6 +1311,10 @@ def _apply_avito_ui_filters(driver, filters):
   _js_expand_collapsed_filters(driver)
   sleep(0.45)
   _try_expand_filter_sections(driver, filters)
+  _scroll_aside_filters_deep(driver)
+  if filters.get("memory") or filters.get("ram") or filters.get("sim") or filters.get("colors"):
+    print("[AVITO] Раскрываю «Показать ещё» в левой колонке (память/SIM/цвет и т.д.)…")
+    _click_show_more_filter_options(driver, max_clicks=10)
   _scroll_aside_filters_deep(driver)
   _log_avito_filters_diagnostics(driver, "after_expand")
   applied = {
