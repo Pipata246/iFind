@@ -228,6 +228,24 @@ def _sleep_with_stop(stop_event, seconds: float, step: float = 0.25):
     sleep(min(step, remaining))
 
 
+def _wait_for_avito_listing_shell(driver, timeout_sec=22, stop_event=None):
+  """Дождаться карточек или блока фильтров (при page_load_strategy=none контент догружается после ready)."""
+  deadline = time.monotonic() + float(timeout_sec)
+  while time.monotonic() < deadline:
+    if stop_event is not None and stop_event.is_set():
+      return False
+    try:
+      if driver.find_elements(
+        By.CSS_SELECTOR,
+        "a[data-marker='item-title'], [data-marker='item'], [data-marker*='filter']",
+      ):
+        return True
+    except Exception:
+      pass
+    sleep(0.35)
+  return False
+
+
 def build_avito_search_url(keyword, model, city, price_min, price_max, page=1):
   q_parts = []
   if keyword:
@@ -461,7 +479,8 @@ def _js_click_filter_option(driver, raw_text: str, mode: str) -> bool:
           if (document.querySelector('aside') && document.querySelector('aside').contains(el)) return true;
           var r = el.getBoundingClientRect();
           if (r.width < 2 || r.height < 2) return false;
-          return r.left < window.innerWidth * 0.44 && r.right <= window.innerWidth * 0.52;
+          // Раньше было 44%/52% — на новой вёрстке колонка фильтров шире; узлы отсекались → «не найден фильтр».
+          return r.left < window.innerWidth * 0.78;
         }
         function clickSmart(el){
           if (!el) return false;
@@ -482,13 +501,13 @@ def _js_click_filter_option(driver, raw_text: str, mode: str) -> bool:
           }
           return false;
         }
-        function collectNodes(){
+        function collectNodes(strictColumn){
           var roots = collectRoots();
           var out = [];
           if (!roots.length) return out;
           roots.forEach(function(root){
             root.querySelectorAll('label, li, div[role], span, button, a, p, div').forEach(function(el){
-              if (!inFilterColumn(el)) return;
+              if (strictColumn !== false && !inFilterColumn(el)) return;
               var t = norm(el.innerText || el.textContent || '');
               if (!t || t.length > 140) return;
               out.push({el: el, t: t});
@@ -496,7 +515,8 @@ def _js_click_filter_option(driver, raw_text: str, mode: str) -> bool:
           });
           return out;
         }
-        var nodes = collectNodes();
+        var nodes = collectNodes(true);
+        if (!nodes.length) nodes = collectNodes(false);
         if (!nodes.length) {
           var asOnly = document.querySelector('aside');
           if (asOnly) {
@@ -1469,20 +1489,27 @@ def parse_avito(
         raise AvitoBlockedError(msg)
       break
 
+    # Иначе фильтры кликаются по пустому DOM → «не найден фильтр», выдача пустая.
+    if not _wait_for_avito_listing_shell(driver, timeout_sec=25, stop_event=stop_event):
+      print("[AVITO] Долго нет карточек/фильтров в DOM — продолжаю, как есть (возможна медленная сеть).")
+
     wait = WebDriverWait(driver, EXPLICIT_WAIT)
-    if page == 1 and filters and _has_meaningful_avito_ui_filters(filters):
+    # КРИТИЧНО: после fallback «без UI» нельзя снова жать фильтры — иначе снова 0 карточек.
+    if page == 1 and filters and not fallback_without_ui_filters_done and _has_meaningful_avito_ui_filters(filters):
       if status_callback:
         try:
           status_callback({"phase": "applying_filters"})
         except Exception as e:
           print(f"[AVITO] status_callback: {e}")
-    if page == 1 and filters:
+    if page == 1 and filters and not fallback_without_ui_filters_done:
       try:
         ui_applied = _apply_avito_ui_filters(driver, filters) or {}
         filtered_base_url = driver.current_url or ""
       except Exception as e:
         print(f"[AVITO] Не удалось применить часть фильтров: {e}")
         ui_applied = {}
+    elif page == 1 and filters and fallback_without_ui_filters_done:
+      print("[AVITO] Повтор после пустой выдачи: UI-фильтры отключены, парсинг по базовому запросу + текстовый отбор в конце.")
     if scroll_passes > 0:
       _scroll_page(driver, scroll_passes, scroll_delay, stop_event=stop_event)
 
@@ -1589,12 +1616,19 @@ def parse_avito(
   text_fallback_ran = False
   if filters and _need_text_fallback(ui_applied, filters):
     before = len(all_items)
-    all_items = _post_filter_avito_items_by_text(all_items, filters, ui_applied)
-    text_fallback_ran = True
-    print(
-      f"[AVITO] Текстовый fallback (UI не применил часть фильтров): было {before} позиций, "
-      f"после отбора по title/URL — {len(all_items)}."
-    )
+    narrowed = _post_filter_avito_items_by_text(all_items, filters, ui_applied)
+    if len(narrowed) == 0 and before > 0:
+      print(
+        "[AVITO] Текстовый fallback дал 0 позиций — оставляю исходную выдачу "
+        "(строгий отбор по title/URL отменён, чтобы не было пустого отчёта)."
+      )
+    else:
+      all_items = narrowed
+      text_fallback_ran = True
+      print(
+        f"[AVITO] Текстовый fallback (UI не применил часть фильтров): было {before} позиций, "
+        f"после отбора по title/URL — {len(all_items)}."
+      )
 
   mode, mode_note = _describe_applied_mode(filters, ui_applied, text_fallback_ran)
   final_meta = _filters_to_excel_meta(filters, applied_mode=mode, ui_applied_note=mode_note)
