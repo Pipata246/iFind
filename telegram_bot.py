@@ -187,6 +187,26 @@ def _format_avito_ready_bot_message(payload: dict) -> str:
   )
 
 
+async def _emit_avito_parse_status(update: Update, payload: dict):
+  """Промежуточные статусы парсинга (синхронно с логами [AVITO])."""
+  phase = payload.get("phase")
+  if phase == "ready":
+    await update.message.reply_text(
+      _format_avito_ready_bot_message(payload),
+      reply_markup=build_stop_keyboard(),
+    )
+  elif phase == "driver_ready":
+    await update.message.reply_text(
+      "Браузер запущен. Загружаю Avito…",
+      reply_markup=build_stop_keyboard(),
+    )
+  elif phase == "applying_filters":
+    await update.message.reply_text(
+      "Страница открыта. Применяю фильтры…",
+      reply_markup=build_stop_keyboard(),
+    )
+
+
 def format_settings_for_user(settings: dict):
   if not settings:
     return "Настройки не заданы."
@@ -309,26 +329,26 @@ async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFA
 
   loop = asyncio.get_running_loop()
 
-  async def _emit_avito_ready(payload: dict):
-    await update.message.reply_text(
-      _format_avito_ready_bot_message(payload),
-      reply_markup=build_stop_keyboard(),
-    )
-
   def _sync_once():
     driver = None
     try:
       driver = build_driver(headless=True)
       context.user_data["active_parse"]["driver"] = driver
 
-      def _status_callback(payload: dict):
-        if payload.get("phase") != "ready":
-          return
-        fut = asyncio.run_coroutine_threadsafe(_emit_avito_ready(payload), loop)
+      def _notify(payload: dict):
+        fut = asyncio.run_coroutine_threadsafe(_emit_avito_parse_status(update, payload), loop)
         try:
           fut.result(timeout=120)
         except Exception as e:
-          print(f"[bot] Сообщение о выдаче: {e}")
+          print(f"[bot] Статус парсинга: {e}")
+
+      _notify({"phase": "driver_ready"})
+
+      def _status_callback(payload: dict):
+        ph = payload.get("phase")
+        if ph not in ("ready", "applying_filters"):
+          return
+        _notify(payload)
 
       items = parse_avito(
         driver,

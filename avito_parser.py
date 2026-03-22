@@ -160,90 +160,147 @@ def _is_avito_blocked(driver):
   return False, ""
 
 
-def _click_text_option(driver, text, must_be_checkbox=False):
-  if not text:
-    return False
+def _norm_filter_text(s):
+  if s is None:
+    return ""
+  return (
+    str(s)
+    .replace("\u00a0", " ")
+    .replace("ё", "е")
+    .replace("Ё", "Е")
+    .strip()
+    .lower()
+    .replace(" ", "")
+  )
 
-  def _norm(s):
-    if s is None:
-      return ""
-    return (
-      str(s)
-      .replace("\u00a0", " ")
-      .replace("ё", "е")
-      .replace("Ё", "Е")
-      .strip()
-      .lower()
-      .replace(" ", "")
-    )
 
-  normalized_target = _norm(text)
-  normalized_target = normalized_target.replace("gb", "гб")
-  variants = [text, text.replace("+", " + "), text.replace("ё", "е")]
-  xpaths = []
-  for variant in variants:
-    xpaths.extend(
-      [
-        f"//label[.//*[normalize-space()='{variant}'] or normalize-space()='{variant}']",
-        f"//label[contains(normalize-space(), '{variant}')]",
-        f"//*[self::span or self::div or self::button][normalize-space()='{variant}']",
-        f"//*[self::span or self::div or self::button][contains(normalize-space(), '{variant}')]",
-      ]
-    )
-  for xpath in xpaths:
+def _filter_search_roots(driver):
+  """Где искать чекбоксы фильтров (не весь DOM — иначе десятки тысяч узлов и минуты на один клик)."""
+  roots = []
+  for sel in (
+    "aside",
+    "[class*='filter']",
+    "[class*='Filter']",
+    "[class*='search-form']",
+    "[data-marker*='filter']",
+    "form",
+  ):
     try:
-      elems = driver.find_elements(By.XPATH, xpath)
-      for elem in elems:
+      for el in driver.find_elements(By.CSS_SELECTOR, sel):
         try:
-          driver.execute_script("arguments[0].scrollIntoView({block:'center'});", elem)
-          sleep(0.25)
-          if must_be_checkbox:
-            role = (elem.get_attribute("role") or "").lower()
-            tag = (elem.tag_name or "").lower()
-            if role == "button" and tag == "button":
-              continue
-          try:
-            elem.click()
-          except Exception:
-            driver.execute_script("arguments[0].click();", elem)
-          return True
+          if el.is_displayed():
+            roots.append(el)
         except Exception:
           continue
     except Exception:
       continue
-
-  # Fallback: сравнение текста в Python, чтобы пережить nbsp и мелкие отличия формата.
-  try:
-    candidates = driver.find_elements(By.CSS_SELECTOR, "label, button, span, div")
-  except Exception:
-    candidates = []
-  for elem in candidates:
+  seen = set()
+  uniq = []
+  for r in roots:
+    rid = id(r)
+    if rid in seen:
+      continue
+    seen.add(rid)
+    uniq.append(r)
+  if not uniq:
     try:
-      elem_text = elem.text or ""
-      norm_elem = _norm(elem_text).replace("gb", "гб")
-      if not norm_elem:
+      return [driver.find_element(By.TAG_NAME, "body")]
+    except Exception:
+      return []
+  return uniq[:10]
+
+
+def _click_text_option(driver, text, must_be_checkbox=False):
+  """Клик по пункту фильтра. Раньше перебирались все label/div на странице — на Avito это зависало на минуты."""
+  del must_be_checkbox  # на текущей вёрстке чипы фильтров часто <button>, их нельзя пропускать
+  if not text:
+    return False
+
+  normalized_target = _norm_filter_text(text).replace("gb", "гб")
+  variants = [text, text.replace("+", " + "), text.replace("ё", "е"), text.replace("е", "ё")]
+  vseen = set()
+  vlist = []
+  for v in variants:
+    k = (v or "").strip()
+    if not k or k in vseen:
+      continue
+    vseen.add(k)
+    vlist.append(k)
+
+  for variant in vlist:
+    if len(variant) > 100:
+      continue
+    # XPath: экранируем кавычки в строке
+    if "'" not in variant:
+      lit = f"'{variant}'"
+    else:
+      lit = '"' + variant.replace('"', '\\"') + '"'
+    xps = [
+      f"//label[contains(normalize-space(), {lit})]",
+      f"//*[self::span or self::div or self::button][contains(normalize-space(), {lit})]",
+      f"//*[@role='checkbox' or @role='switch'][contains(., {lit})]",
+      f"//*[contains(@class,'Checkbox') or contains(@class,'checkbox')][contains(., {lit})]",
+    ]
+    for xp in xps:
+      try:
+        elems = driver.find_elements(By.XPATH, xp)
+        for elem in elems[:30]:
+          try:
+            if not elem.is_displayed():
+              continue
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", elem)
+            sleep(0.12)
+            try:
+              elem.click()
+            except Exception:
+              driver.execute_script("arguments[0].click();", elem)
+            return True
+          except Exception:
+            continue
+      except Exception:
         continue
-      target_digits = re.sub(r"\D", "", normalized_target)
-      elem_digits = re.sub(r"\D", "", norm_elem)
-      if (
-        norm_elem == normalized_target
-        or normalized_target in norm_elem
-        or (len(norm_elem) > 3 and norm_elem in normalized_target)
-        or (
-          target_digits
-          and elem_digits == target_digits
-          and ("гб" in normalized_target or "gb" in normalized_target)
+
+  roots = _filter_search_roots(driver)
+  for root in roots:
+    try:
+      candidates = root.find_elements(
+        By.CSS_SELECTOR,
+        "label, button, span[role], div[role], span, div[class*='Checkbox'], div[class*='checkbox']",
+      )
+    except Exception:
+      continue
+    for elem in candidates[:450]:
+      try:
+        if not elem.is_displayed():
+          continue
+        elem_text = elem.text or ""
+        norm_elem = _norm_filter_text(elem_text).replace("gb", "гб")
+        if not norm_elem:
+          continue
+        target_digits = re.sub(r"\D", "", normalized_target)
+        elem_digits = re.sub(r"\D", "", norm_elem)
+        match = (
+          norm_elem == normalized_target
+          or normalized_target in norm_elem
+          or norm_elem in normalized_target
+          or (len(norm_elem) > 2 and (norm_elem in normalized_target or normalized_target in norm_elem))
+          or (
+            target_digits
+            and elem_digits == target_digits
+            and ("гб" in normalized_target or "gb" in normalized_target)
+          )
         )
-      ):
+        if not match:
+          continue
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", elem)
-        sleep(0.2)
+        sleep(0.1)
         try:
           elem.click()
         except Exception:
           driver.execute_script("arguments[0].click();", elem)
         return True
-    except Exception:
-      continue
+      except Exception:
+        continue
   return False
 
 
@@ -276,11 +333,104 @@ def _capacity_variants(value):
   return out
 
 
+def _uniq_strings(seq):
+  out = []
+  seen = set()
+  for x in seq:
+    if not x:
+      continue
+    k = str(x).strip().lower()
+    if not k or k in seen:
+      continue
+    seen.add(k)
+    out.append(x.strip() if isinstance(x, str) else x)
+  return out
+
+
+def _sim_variants(value):
+  """Варианты подписи SIM на Avito (часто отличается от ввода пользователя)."""
+  raw = (value or "").strip()
+  if not raw:
+    return []
+  variants = [raw, raw.replace("ё", "е"), raw.replace("е", "ё")]
+  low = raw.lower().replace("ё", "е")
+  variants.extend(
+    [
+      raw.replace(" ", ""),
+      raw.upper(),
+      raw.lower(),
+      "1 SIM",
+      "1 sim",
+      "1SIM",
+      "SIM",
+      "sim",
+      "1 nano-SIM",
+      "nano-SIM + eSIM",
+      "2 SIM",
+      "2 sim",
+      "2SIM",
+    ]
+  )
+  if "1" in low or re.search(r"\b1\b", raw):
+    variants.extend(["1 SIM", "1 sim", "1sim", "SIM", "1 SIM-карта", "1 SIM"])
+  if "2" in low or re.search(r"\b2\b", raw):
+    variants.extend(["2 SIM", "2 sim", "2SIM"])
+  return _uniq_strings(variants)
+
+
+def _color_variants(value):
+  """Ё/е и типичные варианты названия цвета на Avito."""
+  raw = (value or "").strip()
+  if not raw:
+    return []
+  variants = [raw, raw.replace("ё", "е"), raw.replace("е", "ё"), raw.title(), raw.lower(), raw.upper()]
+  low = raw.lower().replace("ё", "е")
+  if "зел" in low:
+    variants.extend(
+      [
+        "Зелёный",
+        "Зеленый",
+        "зелёный",
+        "зеленый",
+        "Зеленый",
+        "Green",
+      ]
+    )
+  if "красн" in low:
+    variants.extend(["Красный", "красный", "Red"])
+  if "черн" in low:
+    variants.extend(["Чёрный", "Черный", "черный", "Black"])
+  if "бел" in low:
+    variants.extend(["Белый", "белый", "White"])
+  if "син" in low:
+    variants.extend(["Синий", "синий", "Blue"])
+  return _uniq_strings(variants)
+
+
+def _rating_variants():
+  return _uniq_strings(
+    [
+      "4 звезды и выше",
+      "4 звезды",
+      "4+",
+      "от 4 звёзд",
+      "от 4 звезд",
+      "Рейтинг 4+",
+      "4 звезды и выше",
+    ]
+  )
+
+
 def _click_show_results_button(driver):
-  """Надежно нажимает кнопку 'Показать N объявлений' после фильтров."""
+  """Надежно нажимает кнопку применения фильтров («Показать N объявлений» и варианты)."""
   xpaths = [
     "//button[contains(normalize-space(), 'Показать') and contains(normalize-space(), 'объяв')]",
     "//a[contains(normalize-space(), 'Показать') and contains(normalize-space(), 'объяв')]",
+    "//span[contains(normalize-space(), 'Показать') and contains(normalize-space(), 'объяв')]",
+    "//*[@role='button' and contains(., 'Показать') and contains(., 'объяв')]",
+    "//button[contains(., 'Показать')]",
+    "//span[contains(., 'Показать') and contains(., 'объяв')]",
+    "//*[contains(@class,'button') and contains(., 'Показать')]",
     "//*[contains(normalize-space(), 'Показать') and contains(normalize-space(), 'объяв')]",
   ]
   for xpath in xpaths:
@@ -355,6 +505,20 @@ def _apply_avito_ui_filters(driver, filters):
   if not filters:
     return
 
+  # Дождаться отрисовки и прокрутить к колонке фильтров (левый aside)
+  sleep(1.8)
+  try:
+    driver.execute_script("window.scrollTo(0, 0);")
+    for aside in driver.find_elements(By.CSS_SELECTOR, "aside")[:2]:
+      try:
+        driver.execute_script("arguments[0].scrollIntoView({block:'start'});", aside)
+        break
+      except Exception:
+        continue
+  except Exception:
+    pass
+  sleep(0.5)
+
   print("[AVITO] Применяю расширенные фильтры в интерфейсе…")
   print(
     "[AVITO] Запрошенные фильтры: "
@@ -401,14 +565,24 @@ def _apply_avito_ui_filters(driver, filters):
       print(f"[AVITO] Не найден фильтр RAM: {value}")
 
   for value in filters.get("sim", []):
-    if _click_text_option(driver, value, must_be_checkbox=True):
+    ok = False
+    for option in _sim_variants(value):
+      if _click_text_option(driver, option, must_be_checkbox=True):
+        ok = True
+        break
+    if ok:
       applied["sim"] += 1
       sleep(0.2)
     else:
       print(f"[AVITO] Не найден фильтр SIM: {value}")
 
   for value in filters.get("colors", []):
-    if _click_text_option(driver, value, must_be_checkbox=True):
+    ok = False
+    for option in _color_variants(value):
+      if _click_text_option(driver, option, must_be_checkbox=True):
+        ok = True
+        break
+    if ok:
       applied["colors"] += 1
       sleep(0.2)
     else:
@@ -432,13 +606,23 @@ def _apply_avito_ui_filters(driver, filters):
     print(f"[AVITO] Не найден фильтр продавца: {seller_label}")
 
   if filters.get("rating_4_plus"):
-    if _click_text_option(driver, "4 звезды и выше", must_be_checkbox=True):
+    ok = False
+    for label in _rating_variants():
+      if _click_text_option(driver, label, must_be_checkbox=True):
+        ok = True
+        break
+    if ok:
       applied["rating_4_plus"] += 1
     else:
       print("[AVITO] Не найден фильтр рейтинга: 4 звезды и выше")
 
   # На Avito после выбора фильтров часто требуется кнопка "Показать N объявлений".
-  clicked_show = _click_show_results_button(driver)
+  clicked_show = False
+  for attempt in range(1, 4):
+    clicked_show = _click_show_results_button(driver)
+    if clicked_show:
+      break
+    sleep(0.9)
   if clicked_show:
     print("[AVITO] Нажал кнопку применения фильтров: 'Показать ... объявлений'.")
   else:
@@ -740,6 +924,12 @@ def parse_avito(
       break
 
     wait = WebDriverWait(driver, EXPLICIT_WAIT)
+    if page == 1 and filters and _has_meaningful_avito_ui_filters(filters):
+      if status_callback:
+        try:
+          status_callback({"phase": "applying_filters"})
+        except Exception as e:
+          print(f"[AVITO] status_callback: {e}")
     if page == 1 and filters:
       try:
         _apply_avito_ui_filters(driver, filters)
