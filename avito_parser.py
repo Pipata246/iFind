@@ -1161,8 +1161,67 @@ def _log_avito_filters_diagnostics(driver, phase: str):
   print(f"[AVITO][diag:{phase}] {payload}")
 
 
+def _wait_for_avito_filters_panel(driver, timeout_sec=45, stop_event=None):
+  """Ждём колонку фильтров: иначе клики идут в пустой DOM → «не найден фильтр»."""
+  deadline = time.monotonic() + float(timeout_sec)
+  while time.monotonic() < deadline:
+    if stop_event is not None and stop_event.is_set():
+      return False
+    try:
+      ok = driver.execute_script(
+        """
+        var a = document.querySelector('aside');
+        if (a) {
+          var r = a.getBoundingClientRect();
+          if (r.height > 50 && r.width > 70) return true;
+        }
+        var dm = document.querySelector('[data-marker*="filter"],[data-marker*="params"]');
+        if (dm) {
+          var r2 = dm.getBoundingClientRect();
+          if (r2.height > 40) return true;
+        }
+        var nodes = document.querySelectorAll('div[class],section[class]');
+        for (var i = 0; i < nodes.length && i < 500; i++) {
+          var c = (nodes[i].className && nodes[i].className.toString()) || '';
+          if (!/sidebar|filters|search-filters|serp-filters|catalog-filters|Filter/i.test(c)) continue;
+          var b = nodes[i].getBoundingClientRect();
+          if (b.height > 85 && b.left < window.innerWidth * 0.58) return true;
+        }
+        var rc = document.querySelector('[role="complementary"]');
+        if (rc && rc.getBoundingClientRect().height > 80) return true;
+        return false;
+        """
+      )
+      if ok:
+        return True
+    except Exception:
+      pass
+    sleep(0.45)
+  return False
+
+
 def _try_open_avito_filters_drawer(driver):
   """На части вёрсток колонка фильтров скрыта за кнопкой «Фильтры» / data-marker."""
+  for xp in (
+    "//button[contains(normalize-space(),'Фильтры')]",
+    "//span[contains(normalize-space(),'Фильтры')]",
+    "//a[contains(normalize-space(),'Все параметры')]",
+    "//button[contains(normalize-space(),'Все параметры')]",
+  ):
+    try:
+      for el in driver.find_elements(By.XPATH, xp)[:5]:
+        try:
+          if el.is_displayed():
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+            sleep(0.15)
+            driver.execute_script("arguments[0].click();", el)
+            sleep(1.1)
+            print(f"[AVITO] Открытие панели: XPath {xp[:50]}…")
+            return True
+        except Exception:
+          continue
+    except Exception:
+      continue
   for css in (
     "button[aria-label*='Фильтр']",
     "button[aria-label*='фильтр']",
@@ -1191,7 +1250,7 @@ def _try_open_avito_filters_drawer(driver):
     clicked = bool(
       driver.execute_script(
         """
-        var labels = ["Фильтры", "Все фильтры", "Параметры", "Подобрать", "Настроить поиск", "Фильтр"];
+        var labels = ["Фильтры", "Все фильтры", "Все параметры", "Параметры", "Подобрать", "Настроить поиск", "Фильтр", "Ещё фильтры"];
         var nodes = document.querySelectorAll("button, a, [role='button'], span, div");
         for (var i = 0; i < nodes.length; i++) {
           var el = nodes[i];
@@ -1381,7 +1440,7 @@ def _detect_total_pages(driver):
   return max_page
 
 
-def _apply_avito_ui_filters(driver, filters):
+def _apply_avito_ui_filters(driver, filters, stop_event=None):
   if not filters:
     return {}
 
@@ -1396,6 +1455,14 @@ def _apply_avito_ui_filters(driver, filters):
     f"seller_type={filters.get('seller_type') or 'all'}, "
     f"rating_4_plus={bool(filters.get('rating_4_plus'))}"
   )
+
+  print("[AVITO] Жду появления колонки/блока фильтров в DOM (до 45 с)…")
+  if not _wait_for_avito_filters_panel(driver, timeout_sec=45, stop_event=stop_event):
+    print(
+      "[AVITO] Колонка фильтров не появилась по таймауту — клики могут не сработать. "
+      "Проверьте [AVITO][diag:*] и скорость сети."
+    )
+  sleep(1.0)
 
   _log_avito_filters_diagnostics(driver, "before_drawer")
   _try_open_avito_filters_drawer(driver)
@@ -1964,7 +2031,7 @@ def parse_avito(
           print(f"[AVITO] status_callback: {e}")
     if page == 1 and filters and not fallback_without_ui_filters_done:
       try:
-        ui_applied = _apply_avito_ui_filters(driver, filters) or {}
+        ui_applied = _apply_avito_ui_filters(driver, filters, stop_event=stop_event) or {}
         filtered_base_url = driver.current_url or ""
         if filtered_base_url:
           print(f"[AVITO] URL после фильтров (для пагинации, параметр f= сохраняется): {filtered_base_url[:300]}")
