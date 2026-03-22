@@ -202,13 +202,14 @@ def _filter_search_roots(driver):
   roots = []
   for sel in (
     "aside",
-    "[class*='filter']",
-    "[class*='Filter']",
     "[data-marker*='filter']",
-    "[class*='search-form']",
+    "[class*='SearchFilters']",
+    "[class*='search-filters']",
+    "[class*='Filter']",
   ):
     try:
-      for el in driver.find_elements(By.CSS_SELECTOR, sel):
+      # Без лимита find_elements по [class*='filter'] на всей странице — десятки секунд.
+      for el in driver.find_elements(By.CSS_SELECTOR, sel)[:25]:
         try:
           if el.is_displayed():
             roots.append(el)
@@ -232,30 +233,33 @@ def _filter_search_roots(driver):
   return uniq[:6]
 
 
-def _quick_filter_clickables(driver):
-  """Чипы фильтров: aside + блоки с *filter* в классе (на Avito колонка не всегда <aside>)."""
+def _quick_filter_clickables(driver, deadline=None):
+  """Чипы фильтров: узкие селекторы, ранний выход и лимит времени (иначе 10+ минут на find_elements)."""
+  cap = _QUICK_FILTER_COLLECT_CAP
+  end = deadline if deadline is not None else time.monotonic() + 5.0
   selectors = (
     "aside label",
     "aside button",
     "aside span",
     "aside div[role]",
+    "[data-marker*='filter'] label",
+    "[data-marker*='filter'] span",
+    "[data-marker*='filter'] button",
     "[class*='SearchFilters'] label",
     "[class*='SearchFilters'] span",
     "[class*='SearchFilters'] button",
     "[class*='search-filters'] label",
     "[class*='search-filters'] span",
-    "[class*='filters'] label",
-    "[class*='filters'] span",
-    "[class*='filters'] button",
-    "[class*='Filter'] label",
-    "[class*='Filter'] span",
-    "[class*='Filter'] button",
   )
   seen = set()
   out = []
   for sel in selectors:
+    if time.monotonic() > end or len(out) >= cap:
+      break
     try:
-      for el in driver.find_elements(By.CSS_SELECTOR, sel):
+      for el in driver.find_elements(By.CSS_SELECTOR, sel)[:35]:
+        if time.monotonic() > end or len(out) >= cap:
+          return out
         try:
           rid = id(el)
           if rid in seen:
@@ -266,20 +270,68 @@ def _quick_filter_clickables(driver):
           continue
     except Exception:
       continue
-  return out[:_QUICK_FILTER_COLLECT_CAP]
+  return out
+
+
+def _js_click_in_filter_column_contains(driver, fragment: str) -> bool:
+  """Клик по элементу в колонке фильтров по подстроке текста (без тяжёлого find_elements по всей странице)."""
+  if not fragment or not str(fragment).strip():
+    return False
+  frag = str(fragment).strip()
+  try:
+    return bool(
+      driver.execute_script(
+        """
+        var needle = (arguments[0] || '').toLowerCase().replace(/\s+/g, ' ').trim();
+        if (!needle) return false;
+        var roots = [];
+        var a = document.querySelector('aside');
+        if (a) roots.push(a);
+        document.querySelectorAll("[data-marker*='filter'],[class*='SearchFilters'],[class*='search-filters']").forEach(function(n) {
+          if (n) roots.push(n);
+        });
+        if (!roots.length) roots.push(document.body);
+        for (var r = 0; r < roots.length; r++) {
+          var root = roots[r];
+          var nodes = root.querySelectorAll('label, button, span, div[role], a, p');
+          for (var i = 0; i < nodes.length; i++) {
+            var el = nodes[i];
+            var t = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+            if (!t || t.length > 160) continue;
+            if (t.indexOf(needle) !== -1) {
+              try {
+                el.scrollIntoView({block:'center'});
+                el.click();
+                return true;
+              } catch (e1) {
+                try {
+                  var ev = new MouseEvent('click', {bubbles: true, cancelable: true, view: window});
+                  el.dispatchEvent(ev);
+                  return true;
+                } catch (e2) {}
+              }
+            }
+          }
+        }
+        return false;
+        """,
+        frag,
+      )
+    )
+  except Exception:
+    return False
 
 
 def _try_expand_filter_sections(driver, filters=None):
   """Раскрыть секции фильтров (часто память/SIM скрыты до клика по заголовку или «Все фильтры»)."""
   for title in ("Все фильтры", "Ещё фильтры", "Показать все фильтры"):
-    if _click_text_option(driver, title, must_be_checkbox=False, timeout_sec=5):
-      sleep(0.7)
+    if _js_click_in_filter_column_contains(driver, title):
+      sleep(0.65)
       break
-  # Раньше: 4 заголовка × полный скан DOM = тысячи is_displayed() и 10+ минут без логов.
   mem_needed = bool(filters and (filters.get("memory") or filters.get("ram")))
   if mem_needed:
     for title in ("Память", "Встроенная память"):
-      _click_text_option(driver, title, must_be_checkbox=False, timeout_sec=5)
+      _js_click_in_filter_column_contains(driver, title)
       sleep(0.2)
   try:
     for aside in driver.find_elements(By.CSS_SELECTOR, "aside")[:1]:
@@ -321,7 +373,7 @@ def _click_text_option_multi(driver, texts, timeout_sec=22, memory_style=False):
   normalized_target = _norm_filter_text(primary).replace("gb", "гб")
   target_digits = re.sub(r"\D", "", normalized_target)
 
-  quick = _quick_filter_clickables(driver)
+  quick = _quick_filter_clickables(driver, deadline=deadline)
   for elem in quick[:_QUICK_FILTER_SCAN_CAP]:
     if _timed_out():
       return False
@@ -380,6 +432,8 @@ def _click_text_option_multi(driver, texts, timeout_sec=22, memory_style=False):
       f"//aside//label[contains(normalize-space(), {lit})]",
       f"//aside//*[self::span or self::div or self::button][contains(normalize-space(), {lit})]",
       f"//aside//*[@role='checkbox' or @role='switch'][contains(., {lit})]",
+      f"//*[contains(@data-marker,'filter')]//label[contains(normalize-space(), {lit})]",
+      f"//*[contains(@data-marker,'filter')]//*[self::span or self::div][contains(normalize-space(), {lit})]",
       f"//*[contains(@class,'SearchFilters')]//label[contains(normalize-space(), {lit})]",
       f"//*[contains(@class,'search-filters')]//label[contains(normalize-space(), {lit})]",
       f"//*[contains(@class,'filters')]//span[contains(normalize-space(), {lit})]",
@@ -463,6 +517,16 @@ def _click_text_option_multi(driver, texts, timeout_sec=22, memory_style=False):
         return True
       except Exception:
         continue
+
+  # Верстка/классы Avito меняются; остаётся поиск по видимому тексту в колонке.
+  for variant in vlist[:22]:
+    if _timed_out():
+      return False
+    q = (variant or "").strip()
+    if len(q) < 2 or len(q) > 90:
+      continue
+    if _js_click_in_filter_column_contains(driver, q):
+      return True
   return False
 
 
@@ -478,10 +542,12 @@ def _capacity_variants(value):
       [
         digits,
         f"{digits} ГБ",
+        f"{digits}\u00a0ГБ",  # неразрывный пробел как на сайте
         f"{digits} Гб",
         f"{digits}гб",
         f"{digits} GB",
         f"{digits}GB",
+        f"{digits} Гб.",
       ]
     )
   # keep order, remove duplicates
@@ -535,7 +601,21 @@ def _sim_variants(value):
     ]
   )
   if "1" in low or re.search(r"\b1\b", raw):
-    variants.extend(["1 SIM", "1 sim", "1sim", "SIM", "1 SIM-карта", "1 SIM"])
+    variants.extend(
+      [
+        "1 SIM",
+        "1 sim",
+        "1sim",
+        "SIM",
+        "1 SIM-карта",
+        "1 SIM",
+        "1 nano-SIM",
+        "1 nano sim",
+        "Nano-SIM",
+        "одна SIM",
+        "1 физическая SIM",
+      ]
+    )
   if "2" in low or re.search(r"\b2\b", raw):
     variants.extend(["2 SIM", "2 sim", "2SIM"])
   return _uniq_strings(variants)
