@@ -141,9 +141,19 @@ def _parse_price_text(price_text):
 
 
 def _is_avito_blocked(driver):
+  """Проверка типовой блок-страницы Avito.
+
+  Раньше использовали ``body.text``: на тяжёлой выдаче Selenium долго считает видимый текст
+  (минуты без новых логов и без прогресса в боте). Берём короткий срез HTML в браузере.
+  """
   try:
-    body_text = driver.find_element(By.TAG_NAME, "body").text.lower()
+    snippet = driver.execute_script(
+      "return (document.documentElement && document.documentElement.outerHTML || '')"
+      ".slice(0, 120000).toLowerCase();"
+    )
   except Exception:
+    return False, ""
+  if not snippet:
     return False, ""
   blocked_markers = (
     "капча",
@@ -155,7 +165,7 @@ def _is_avito_blocked(driver):
     "подозрительная активность",
   )
   for marker in blocked_markers:
-    if marker in body_text:
+    if marker in snippet:
       return True, marker
   return False, ""
 
@@ -1039,10 +1049,7 @@ def parse_avito(
 
     blocked, reason = _is_avito_blocked(driver)
     if blocked:
-      msg = (
-        f"[AVITO] Обнаружена блокировка/проверка ({reason}). "
-        "Подождите 30–60 мин или смените IP/прокси."
-      )
+      msg = f"[AVITO] Обнаружена блокировка/проверка ({reason})."
       print(msg)
       if raise_on_block:
         raise AvitoBlockedError(msg)
