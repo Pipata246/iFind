@@ -2,7 +2,7 @@ import random
 import re
 import time
 from time import sleep
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlunparse
 
 from bs4 import BeautifulSoup
 from selenium.common.exceptions import TimeoutException, WebDriverException
@@ -1302,22 +1302,78 @@ def _describe_applied_mode(filters, ui_applied, text_fallback_ran: bool):
   return ("ui", note)
 
 
+def _page_from_href(href: str):
+  """Номер страницы только из query-параметра p (не подстрока 'p=' внутри f=)."""
+  if not href:
+    return None
+  try:
+    qs = parse_qs(urlparse(href).query)
+    if "p" in qs and qs["p"]:
+      return int(qs["p"][0])
+  except Exception:
+    pass
+  return None
+
+
 def _detect_total_pages(driver):
-  """Определяет число страниц в текущей выдаче Avito после применения фильтров."""
+  """Определяет число страниц в блоке пагинации (иначе в f= и в левой колонке ловятся ложные p=)."""
+  try:
+    n = driver.execute_script(
+      """
+      var max = 1;
+      var roots = document.querySelectorAll(
+        '[data-marker*="pagination"], [class*="Pagination"], nav[aria-label*="Страниц"], [class*="pagination"]'
+      );
+      for (var r = 0; r < roots.length; r++) {
+        var nav = roots[r];
+        nav.querySelectorAll('a[href]').forEach(function(a){
+          try {
+            var u = new URL(a.href, location.href);
+            var p = u.searchParams.get('p');
+            if (p !== null && p !== '') {
+              var n = parseInt(p, 10);
+              if (!isNaN(n)) max = Math.max(max, n);
+            }
+          } catch (e) {}
+        });
+        nav.querySelectorAll('a,button,span').forEach(function(el){
+          var t = (el.innerText || '').trim();
+          if (/^\\d{1,4}$/.test(t)) {
+            var n2 = parseInt(t, 10);
+            if (!isNaN(n2) && n2 < 5000) max = Math.max(max, n2);
+          }
+        });
+      }
+      return max;
+      """
+    )
+    if isinstance(n, int) and n >= 1:
+      return min(n, 500)
+  except Exception:
+    pass
+
   max_page = 1
   try:
-    page_links = driver.find_elements(By.XPATH, "//a[contains(@href, 'p=') or @data-marker]")
+    page_links = driver.find_elements(
+      By.CSS_SELECTOR,
+      "[data-marker*='pagination'] a[href], nav[aria-label*='Страниц'] a[href], [class*='Pagination'] a[href]",
+    )
   except Exception:
     page_links = []
-  for link in page_links:
+  if not page_links:
+    try:
+      page_links = driver.find_elements(By.XPATH, "//a[contains(@href, 'avito.ru') and contains(@href, '&p=')]")
+    except Exception:
+      page_links = []
+  for link in page_links[:80]:
     try:
       text = (link.text or "").strip()
       href = (link.get_attribute("href") or "").strip()
-      if text.isdigit():
+      if text.isdigit() and len(text) <= 4:
         max_page = max(max_page, int(text))
-      m = re.search(r"[?&]p=(\d+)", href)
-      if m:
-        max_page = max(max_page, int(m.group(1)))
+      pn = _page_from_href(href)
+      if pn is not None:
+        max_page = max(max_page, pn)
     except Exception:
       continue
   return max_page
@@ -1470,44 +1526,76 @@ def _apply_avito_ui_filters(driver, filters):
   return applied
 
 
+def _normalize_avito_item_href(href: str) -> str:
+  """Один URL на объявление — убираем дубли DOM (два [data-marker=item] на карточку и т.п.)."""
+  h = (href or "").strip()
+  if not h:
+    return ""
+  if h.startswith("/"):
+    h = f"{AVITO_BASE_URL}{h}"
+  # Без query — достаточно для дедупа карточки
+  return h.split("?")[0].rstrip("/")
+
+
 def _get_cards(driver, wait):
-  card_selectors = [
-    "[data-marker='item']",
-    "div[data-marker='catalog-serp'] div[class*='iva-item-root-']",
-    "div[class*='iva-item-root-']",
-    "div[class*='iva-item-content-']",
-    ".iva-item-content-fRmzq",
-  ]
+  """Карточки = одна ссылка item-title → один контейнер. Иначе [data-marker=item] даёт 2× узлов и «50 вместо 25»."""
   cards = []
-  for selector in card_selectors:
-    try:
-      wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, selector)))
-      cards = driver.find_elements(By.CSS_SELECTOR, selector)
-      if cards:
-        return cards
-    except Exception:
-      continue
   try:
-    wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, "a[data-marker='item-title']")))
+    wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "a[data-marker='item-title']")))
+  except Exception:
+    pass
+  try:
     title_links = driver.find_elements(By.CSS_SELECTOR, "a[data-marker='item-title']")
-    for link in title_links:
+    seen_key = set()
+    for link in title_links[:200]:
       try:
-        card = link.find_element(By.XPATH, "./ancestor::*[@data-marker='item'][1]")
-        if card:
-          cards.append(card)
+        href = _normalize_avito_item_href(link.get_attribute("href") or "")
+        if not href:
           continue
+        key = href.lower()
+        if key in seen_key:
+          continue
+        seen_key.add(key)
+        try:
+          card = link.find_element(By.XPATH, "./ancestor::*[@data-marker='item'][1]")
+        except Exception:
+          card = link.find_element(By.XPATH, "./ancestor::div[contains(@class,'iva-item-root')][1]")
+        cards.append(card)
       except Exception:
-        pass
-      try:
-        card = link.find_element(By.XPATH, "./ancestor::div[contains(@class,'iva-item-root')][1]")
-        if card:
-          cards.append(card)
-      except Exception:
-        pass
+        continue
     if cards:
       return cards
   except Exception:
     pass
+
+  card_selectors = [
+    "div[data-marker='catalog-serp'] [data-marker='item']",
+    "[data-marker='catalog-serp'] [data-marker='item']",
+    "[data-marker='item']",
+    "div[data-marker='catalog-serp'] div[class*='iva-item-root-']",
+    "div[class*='iva-item-root-']",
+  ]
+  for selector in card_selectors:
+    try:
+      wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
+      raw = driver.find_elements(By.CSS_SELECTOR, selector)
+      if not raw:
+        continue
+      seen = set()
+      out = []
+      for el in raw[:200]:
+        try:
+          rid = id(el)
+          if rid in seen:
+            continue
+          seen.add(rid)
+          out.append(el)
+        except Exception:
+          continue
+      if out:
+        return out
+    except Exception:
+      continue
   return []
 
 
@@ -1607,7 +1695,10 @@ def _parse_cards_to_items(cards, city, price_min, price_max):
     "skipped_price": 0,
     "skipped_error": 0,
   }
-  for card in cards:
+  total_cards = len(cards)
+  for idx, card in enumerate(cards, start=1):
+    if total_cards > 12 and (idx == 1 or idx % 10 == 0 or idx == total_cards):
+      print(f"[AVITO] Разбор карточек DOM: {idx}/{total_cards}…")
     try:
       title_el = card.find_element(By.CSS_SELECTOR, "a[data-marker='item-title']")
       title = title_el.text.strip()
@@ -1791,6 +1882,8 @@ def parse_avito(
       try:
         ui_applied = _apply_avito_ui_filters(driver, filters) or {}
         filtered_base_url = driver.current_url or ""
+        if filtered_base_url:
+          print(f"[AVITO] URL после фильтров (для пагинации, параметр f= сохраняется): {filtered_base_url[:300]}")
       except Exception as e:
         print(f"[AVITO] Не удалось применить часть фильтров: {e}")
         ui_applied = {}
@@ -1832,7 +1925,24 @@ def parse_avito(
     # После успешной первой страницы (есть карточки): число страниц в выдаче + лимит за запуск.
     # Не вызываем до fallback «без UI-фильтров», чтобы не слать в бот неверные цифры.
     if page == 1 and not parse_scope_announced:
+      print("[AVITO] Определяю число страниц пагинации…")
       detected_pages = _detect_total_pages(driver)
+      # Узкая выдача по фильтрам: на 1-й странице <50 карточек → обычно одна страница (не доверяем ложным «40 стр.» из старых ссылок)
+      try:
+        fb = filtered_base_url or ""
+        has_f = "f=" in fb or "&f=" in fb or "?f=" in fb
+        if has_f and _has_meaningful_avito_ui_filters(filters or {}):
+          nt = len(driver.find_elements(By.CSS_SELECTOR, "a[data-marker='item-title']"))
+          if 0 < nt < 50:
+            old_dp = detected_pages
+            detected_pages = min(detected_pages, 1)
+            if old_dp != detected_pages:
+              print(
+                f"[AVITO] На стр.1 только {nt} объявлений при активных фильтрах — "
+                f"страниц для обхода: {detected_pages} (было бы {old_dp} без ограничения)."
+              )
+      except Exception:
+        pass
       effective_max_pages = min(max_pages, max(1, detected_pages), AVITO_MAX_PAGES_PER_RUN)
       print(
         f"[AVITO] Страниц в выдаче: {detected_pages}. "
