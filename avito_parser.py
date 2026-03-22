@@ -228,20 +228,70 @@ def _sleep_with_stop(stop_event, seconds: float, step: float = 0.25):
     sleep(min(step, remaining))
 
 
-def _wait_for_avito_listing_shell(driver, timeout_sec=22, stop_event=None):
+def _avito_listing_shell_present(driver) -> bool:
+  """Проверка, что в DOM появилась выдача или колонка фильтров (несколько вариантов вёрстки)."""
+  try:
+    if driver.find_elements(
+      By.CSS_SELECTOR,
+      ",".join(
+        [
+          "a[data-marker='item-title']",
+          "[data-marker='item']",
+          "[data-marker*='filter']",
+          "[data-marker='catalog-serp']",
+          "[class*='iva-item-root']",
+          "[class*='iva-item-content']",
+          "[class*='items-items']",
+          "[class*='serp-item']",
+        ]
+      ),
+    ):
+      return True
+  except Exception:
+    pass
+  try:
+    return bool(
+      driver.execute_script(
+        """
+        if (document.querySelector('a[data-marker="item-title"]')) return true;
+        if (document.querySelector('[class*="iva-item-root"]')) return true;
+        if (document.querySelector('[class*="iva-item-content"]')) return true;
+        var links = document.querySelectorAll('a[href*="/item/"]');
+        return links.length >= 2;
+        """
+      )
+    )
+  except Exception:
+    return False
+
+
+def _log_avito_empty_page_probe(driver):
+  """Если выдачи нет в DOM — короткий срез текста/заголовка (капча, пустая страница, антибот)."""
+  try:
+    payload = driver.execute_script(
+      """
+      var t = (document.body && document.body.innerText) ? document.body.innerText : '';
+      t = t.replace(/\\s+/g, ' ').trim().slice(0, 420);
+      return JSON.stringify({
+        title: (document.title || '').slice(0, 140),
+        bodySample: t,
+        dataMarkerCount: document.querySelectorAll('[data-marker]').length
+      });
+      """
+    )
+    print(f"[AVITO][probe] {payload}")
+  except Exception as e:
+    print(f"[AVITO][probe] ошибка: {e}")
+
+
+def _wait_for_avito_listing_shell(driver, timeout_sec=45, stop_event=None):
   """Дождаться карточек или блока фильтров (при page_load_strategy=none контент догружается после ready)."""
   deadline = time.monotonic() + float(timeout_sec)
   while time.monotonic() < deadline:
     if stop_event is not None and stop_event.is_set():
       return False
-    try:
-      if driver.find_elements(
-        By.CSS_SELECTOR,
-        "a[data-marker='item-title'], [data-marker='item'], [data-marker*='filter']",
-      ):
-        return True
-    except Exception:
-      pass
+    if _avito_listing_shell_present(driver):
+      return True
     sleep(0.35)
   return False
 
@@ -1710,8 +1760,24 @@ def parse_avito(
       break
 
     # Иначе фильтры кликаются по пустому DOM → «не найден фильтр», выдача пустая.
-    if not _wait_for_avito_listing_shell(driver, timeout_sec=25, stop_event=stop_event):
-      print("[AVITO] Долго нет карточек/фильтров в DOM — продолжаю, как есть (возможна медленная сеть).")
+    shell_ok = _wait_for_avito_listing_shell(driver, timeout_sec=50, stop_event=stop_event)
+    if not shell_ok:
+      _log_avito_empty_page_probe(driver)
+      print("[AVITO] Первая попытка: выдача в DOM не появилась — делаю refresh и жду снова…")
+      try:
+        driver.refresh()
+        if not wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT, stop_event):
+          print("[AVITO] После refresh document.readyState не готов — всё равно продолжаю.")
+        _sleep_with_stop(stop_event, 2.0)
+      except Exception as e:
+        print(f"[AVITO] Ошибка refresh: {e}")
+      shell_ok = _wait_for_avito_listing_shell(driver, timeout_sec=45, stop_event=stop_event)
+    if not shell_ok:
+      _log_avito_empty_page_probe(driver)
+      print(
+        "[AVITO] Долго нет карточек/фильтров в DOM — продолжаю, как есть "
+        "(медленная сеть, антибот или другая вёрстка). Смотрите [AVITO][probe] выше."
+      )
 
     wait = WebDriverWait(driver, EXPLICIT_WAIT)
     # КРИТИЧНО: после fallback «без UI» нельзя снова жать фильтры — иначе снова 0 карточек.
