@@ -273,49 +273,186 @@ def _quick_filter_clickables(driver, deadline=None):
   return out
 
 
-def _js_click_in_filter_column_contains(driver, fragment: str) -> bool:
-  """Клик по элементу в колонке фильтров по подстроке текста (без тяжёлого find_elements по всей странице)."""
-  if not fragment or not str(fragment).strip():
+def _js_expand_collapsed_filters(driver):
+  """Раскрыть свёрнутые блоки фильтров (aria-expanded, иначе опции не в DOM / не кликаются)."""
+  try:
+    driver.execute_script(
+      """
+      (function(){
+        var roots = [];
+        var a = document.querySelector('aside');
+        if (a) roots.push(a);
+        document.querySelectorAll('[data-marker*="filter"],[data-marker*="params"]').forEach(function(n){ roots.push(n); });
+        roots.forEach(function(root){
+          if (!root) return;
+          root.querySelectorAll('[aria-expanded="false"]').forEach(function(el){
+            try {
+              var r = el.getBoundingClientRect();
+              if (r.width > 2 && r.height > 2) el.click();
+            } catch (e) {}
+          });
+        });
+      })();
+      """
+    )
+  except Exception:
+    pass
+
+
+def _js_click_filter_option(driver, raw_text: str, mode: str) -> bool:
+  """Клик по значению фильтра в колонке (aside / data-marker / левая часть экрана).
+
+  mode: memory | sim | color | rating | text | header
+  На новой вёрстке Avito нет стабильного <aside>; ищем в контейнерах и кликаем input/label.
+  """
+  if not raw_text or not str(raw_text).strip():
     return False
-  frag = str(fragment).strip()
   try:
     return bool(
       driver.execute_script(
         """
-        var needle = (arguments[0] || '').toLowerCase().replace(/\s+/g, ' ').trim();
-        if (!needle) return false;
-        var roots = [];
-        var a = document.querySelector('aside');
-        if (a) roots.push(a);
-        document.querySelectorAll("[data-marker*='filter'],[class*='SearchFilters'],[class*='search-filters']").forEach(function(n) {
-          if (n) roots.push(n);
-        });
-        if (!roots.length) roots.push(document.body);
-        for (var r = 0; r < roots.length; r++) {
-          var root = roots[r];
-          var nodes = root.querySelectorAll('label, button, span, div[role], a, p');
-          for (var i = 0; i < nodes.length; i++) {
-            var el = nodes[i];
-            var t = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
-            if (!t || t.length > 160) continue;
-            if (t.indexOf(needle) !== -1) {
-              try {
-                el.scrollIntoView({block:'center'});
-                el.click();
-                return true;
-              } catch (e1) {
-                try {
-                  var ev = new MouseEvent('click', {bubbles: true, cancelable: true, view: window});
-                  el.dispatchEvent(ev);
-                  return true;
-                } catch (e2) {}
-              }
+        var raw = arguments[0];
+        var mode = arguments[1];
+        function norm(s){ return (s||'').toLowerCase().replace(/\\s+/g,'').replace(/ё/g,'е'); }
+        function collectRoots(){
+          var list = [];
+          var seen = new Set();
+          function add(n){
+            if (!n || n.nodeType !== 1 || seen.has(n)) return;
+            try {
+              var b = n.getBoundingClientRect();
+              if (b.width < 30 || b.height < 8) return;
+            } catch (e) { return; }
+            seen.add(n);
+            list.push(n);
+          }
+          var aside = document.querySelector('aside');
+          if (aside) add(aside);
+          document.querySelectorAll('[data-marker*="filter"],[data-marker*="params"],[class*="SearchFilters"],[class*="search-filters"],[class*="styles-module-sidebar"]').forEach(add);
+          if (list.length === 0) {
+            document.querySelectorAll('section,div').forEach(function(n){
+              var dm = n.getAttribute('data-marker') || '';
+              if (dm.indexOf('filter') !== -1 || dm.indexOf('params') !== -1) add(n);
+            });
+          }
+          return list;
+        }
+        function inFilterColumn(el){
+          if (!el || !el.getBoundingClientRect) return false;
+          if (document.querySelector('aside') && document.querySelector('aside').contains(el)) return true;
+          var r = el.getBoundingClientRect();
+          if (r.width < 2 || r.height < 2) return false;
+          return r.left < window.innerWidth * 0.44 && r.right <= window.innerWidth * 0.52;
+        }
+        function clickSmart(el){
+          if (!el) return false;
+          try { el.scrollIntoView({block:'center', behavior:'instant'}); } catch (e1) {}
+          var p = el;
+          for (var i = 0; i < 10 && p; i++) {
+            var inp = p.querySelector && p.querySelector('input[type="checkbox"], input[type="radio"]');
+            if (inp) {
+              try { inp.click(); return true; } catch (e2) {}
             }
+            p = p.parentElement;
+          }
+          try { el.click(); return true; } catch (e3) {
+            try {
+              el.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window}));
+              return true;
+            } catch (e4) {}
+          }
+          return false;
+        }
+        function collectNodes(){
+          var roots = collectRoots();
+          var out = [];
+          if (!roots.length) return out;
+          roots.forEach(function(root){
+            root.querySelectorAll('label, li, div[role], span, button, a, p, div').forEach(function(el){
+              if (!inFilterColumn(el)) return;
+              var t = norm(el.innerText || el.textContent || '');
+              if (!t || t.length > 140) return;
+              out.push({el: el, t: t});
+            });
+          });
+          return out;
+        }
+        var nodes = collectNodes();
+        if (!nodes.length) {
+          var asOnly = document.querySelector('aside');
+          if (asOnly) {
+            asOnly.querySelectorAll('label, span, button, div, a').forEach(function(el){
+              var t = norm(el.innerText || el.textContent || '');
+              if (t && t.length < 140) nodes.push({el: el, t: t});
+            });
+          }
+        }
+        if (!nodes.length) return false;
+        var needle = norm(raw);
+        var dg = String(raw).replace(/\\D/g, '');
+        if (mode === 'memory' && dg) {
+          for (var i = 0; i < nodes.length; i++) {
+            var t = nodes[i].t;
+            if (t.indexOf(dg) === -1) continue;
+            if (t.indexOf('гб') === -1 && t.indexOf('gb') === -1) continue;
+            if (clickSmart(nodes[i].el)) return true;
+          }
+          for (var j = 0; j < nodes.length; j++) {
+            var t2 = nodes[j].t;
+            if (t2 === dg || (t2.length <= 14 && t2.indexOf(dg) !== -1 && /гб|gb/.test(t2))) {
+              if (clickSmart(nodes[j].el)) return true;
+            }
+          }
+          return false;
+        }
+        if (mode === 'sim') {
+          for (var s = 0; s < nodes.length; s++) {
+            var ts = nodes[s].t;
+            if (ts.indexOf('sim') === -1 && ts.indexOf('сим') === -1 && ts.indexOf('nano') === -1) continue;
+            if (needle.length >= 2 && (ts.indexOf(needle) !== -1 || needle.indexOf(ts) !== -1)) {
+              if (clickSmart(nodes[s].el)) return true;
+            }
+          }
+          for (var s2 = 0; s2 < nodes.length; s2++) {
+            var ts2 = nodes[s2].t;
+            if (ts2.indexOf(needle) !== -1 && ts2.length < 48) {
+              if (clickSmart(nodes[s2].el)) return true;
+            }
+          }
+          return false;
+        }
+        if (mode === 'color') {
+          for (var c = 0; c < nodes.length; c++) {
+            var tc = nodes[c].t;
+            if (tc.indexOf(needle) !== -1 && tc.length < 56) {
+              if (clickSmart(nodes[c].el)) return true;
+            }
+          }
+          return false;
+        }
+        if (mode === 'rating') {
+          for (var r = 0; r < nodes.length; r++) {
+            var tr = nodes[r].t;
+            if ((tr.indexOf('звезд') !== -1 || tr.indexOf('рейтинг') !== -1) && tr.indexOf(needle.substring(0, Math.min(needle.length, 12))) !== -1) {
+              if (clickSmart(nodes[r].el)) return true;
+            }
+          }
+          for (var r2 = 0; r2 < nodes.length; r2++) {
+            if (nodes[r2].t.indexOf(needle) !== -1) {
+              if (clickSmart(nodes[r2].el)) return true;
+            }
+          }
+          return false;
+        }
+        for (var k = 0; k < nodes.length; k++) {
+          if (nodes[k].t.indexOf(needle) !== -1) {
+            if (clickSmart(nodes[k].el)) return true;
           }
         }
         return false;
         """,
-        frag,
+        str(raw_text).strip(),
+        mode,
       )
     )
   except Exception:
@@ -325,13 +462,13 @@ def _js_click_in_filter_column_contains(driver, fragment: str) -> bool:
 def _try_expand_filter_sections(driver, filters=None):
   """Раскрыть секции фильтров (часто память/SIM скрыты до клика по заголовку или «Все фильтры»)."""
   for title in ("Все фильтры", "Ещё фильтры", "Показать все фильтры"):
-    if _js_click_in_filter_column_contains(driver, title):
+    if _js_click_filter_option(driver, title, "text"):
       sleep(0.65)
       break
   mem_needed = bool(filters and (filters.get("memory") or filters.get("ram")))
   if mem_needed:
     for title in ("Память", "Встроенная память"):
-      _js_click_in_filter_column_contains(driver, title)
+      _js_click_filter_option(driver, title, "text")
       sleep(0.2)
   try:
     for aside in driver.find_elements(By.CSS_SELECTOR, "aside")[:1]:
@@ -341,15 +478,15 @@ def _try_expand_filter_sections(driver, filters=None):
     pass
 
 
-def _click_text_option(driver, text, must_be_checkbox=False, timeout_sec=22):
+def _click_text_option(driver, text, must_be_checkbox=False, timeout_sec=22, js_mode=None):
   """Клик по одному тексту фильтра. timeout_sec — на весь вызов (не на каждый вариант списка)."""
   del must_be_checkbox
   if not text:
     return False
-  return _click_text_option_multi(driver, [text], timeout_sec=timeout_sec, memory_style=False)
+  return _click_text_option_multi(driver, [text], timeout_sec=timeout_sec, memory_style=False, js_mode=js_mode)
 
 
-def _click_text_option_multi(driver, texts, timeout_sec=22, memory_style=False):
+def _click_text_option_multi(driver, texts, timeout_sec=22, memory_style=False, js_mode=None):
   """Один проход по всем строкам-вариантам (128 ГБ, 128, …) — иначе 7×25 с ≈ 3 мин на один фильтр памяти."""
   if not texts:
     return False
@@ -372,6 +509,41 @@ def _click_text_option_multi(driver, texts, timeout_sec=22, memory_style=False):
   primary = (texts[0] or "").strip()
   normalized_target = _norm_filter_text(primary).replace("gb", "гб")
   target_digits = re.sub(r"\D", "", normalized_target)
+
+  mode = js_mode
+  if not mode:
+    mode = "memory" if memory_style else "text"
+    if not memory_style:
+      joined = " ".join(vlist[:8]).lower()
+      if "sim" in joined or "nano" in joined:
+        mode = "sim"
+      elif any(
+        x in joined
+        for x in (
+          "зел",
+          "красн",
+          "син",
+          "бел",
+          "черн",
+          "фиолет",
+          "розов",
+          "золот",
+          "серебр",
+          "серый",
+          "оранж",
+        )
+      ):
+        mode = "color"
+      elif "звезд" in joined or "рейтинг" in joined:
+        mode = "rating"
+  for variant in vlist[:22]:
+    if _timed_out():
+      return False
+    q = (variant or "").strip()
+    if len(q) < 2 or len(q) > 90:
+      continue
+    if _js_click_filter_option(driver, q, mode):
+      return True
 
   quick = _quick_filter_clickables(driver, deadline=deadline)
   for elem in quick[:_QUICK_FILTER_SCAN_CAP]:
@@ -518,15 +690,6 @@ def _click_text_option_multi(driver, texts, timeout_sec=22, memory_style=False):
       except Exception:
         continue
 
-  # Верстка/классы Avito меняются; остаётся поиск по видимому тексту в колонке.
-  for variant in vlist[:22]:
-    if _timed_out():
-      return False
-    q = (variant or "").strip()
-    if len(q) < 2 or len(q) > 90:
-      continue
-    if _js_click_in_filter_column_contains(driver, q):
-      return True
   return False
 
 
@@ -775,6 +938,8 @@ def _apply_avito_ui_filters(driver, filters):
   sleep(0.5)
 
   print("[AVITO] Раскрываю секции фильтров (если нужно)…")
+  _js_expand_collapsed_filters(driver)
+  sleep(0.45)
   _try_expand_filter_sections(driver, filters)
   applied = {
     "memory": 0,
