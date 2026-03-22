@@ -290,7 +290,7 @@ async def ask_parse_scope_before_run(update: Update, context: ContextTypes.DEFAU
 async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFAULT_TYPE):
   # Импортируем локально, чтобы не тянуть Selenium при старте бота
   from main import build_driver
-  from avito_parser import AvitoBlockedError, parse_avito
+  from avito_parser import parse_avito
   from excel_export import export_to_excel
 
   supabase: Client = context.bot_data.get("supabase_client")
@@ -378,29 +378,11 @@ async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFA
       except Exception:
         pass
 
-  max_attempts = 3
-  retry_wait_sec = 130
+  # Повторы при капче — внутри parse_avito (до AVITO_BLOCK_MAX_RETRIES_PER_PAGE на каждую страницу).
   filepath = None
   try:
-    for attempt in range(1, max_attempts + 1):
-      if stop_event.is_set():
-        break
-      try:
-        filepath = await asyncio.to_thread(_sync_once)
-        break
-      except AvitoBlockedError:
-        if attempt >= max_attempts:
-          raise
-        await update.message.reply_text(
-          f"Avito ограничил доступ. Жду {retry_wait_sec} сек и пробую снова ({attempt + 1}/{max_attempts})…",
-          reply_markup=build_stop_keyboard(),
-        )
-        for _ in range(retry_wait_sec):
-          if stop_event.is_set():
-            break
-          await asyncio.sleep(1)
-        if stop_event.is_set():
-          break
+    if not stop_event.is_set():
+      filepath = await asyncio.to_thread(_sync_once)
   except Exception as e:
     context.user_data.pop("active_parse", None)
     if context.user_data.get("stop_notified"):

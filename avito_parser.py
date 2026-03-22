@@ -13,6 +13,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 from browser_helpers import wait_for_document_ready
 from config import (
   AVITO_BASE_URL,
+  AVITO_BLOCK_MAX_RETRIES_PER_PAGE,
+  AVITO_BLOCK_RETRY_WAIT_SEC,
   AVITO_MAX_PAGES_PER_RUN,
   DOCUMENT_READY_TIMEOUT,
   EXPLICIT_WAIT,
@@ -1798,56 +1800,85 @@ def parse_avito(
       url = _build_page_url(filtered_base_url, page)
     else:
       url = build_avito_search_url(keyword, model, city, price_min, price_max, page=page)
-    print(f"[AVITO] Страница {page}/{max_pages}: загрузка…")
 
-    loaded = False
-    for attempt in range(1, 4):
-      try:
-        driver.get(url)
-        print(f"[AVITO] Ожидание готовности страницы (до {DOCUMENT_READY_TIMEOUT} сек, без ожидания полной загрузки ресурсов)…")
-        if not wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT, stop_event):
-          raise TimeoutException("document.readyState не достиг готовности")
-        loaded = True
+    # Защита: капча/блокировка — до 3 раз на КАЖДУЮ страницу (счётчик сбрасывается на новой странице),
+    # пауза между раундами — смена IP у мобильного прокси.
+    abort_page_loop = False
+    for block_round in range(1, AVITO_BLOCK_MAX_RETRIES_PER_PAGE + 1):
+      if block_round > 1:
+        print(
+          f"[AVITO] Страница {page}: повтор после блокировки — раунд {block_round}/"
+          f"{AVITO_BLOCK_MAX_RETRIES_PER_PAGE} (ожидание смены IP)…"
+        )
+      else:
+        print(f"[AVITO] Страница {page}/{max_pages}: загрузка…")
+
+      loaded = False
+      for attempt in range(1, 4):
+        try:
+          driver.get(url)
+          print(
+            f"[AVITO] Ожидание готовности страницы (до {DOCUMENT_READY_TIMEOUT} сек, "
+            "без ожидания полной загрузки ресурсов)…"
+          )
+          if not wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT, stop_event):
+            raise TimeoutException("document.readyState не достиг готовности")
+          loaded = True
+          break
+        except TimeoutException:
+          print(f"[AVITO] Таймаут загрузки (попытка {attempt}/3). Пауза 10 сек…")
+          _sleep_with_stop(stop_event, 10)
+        except (WebDriverException, OSError, Exception) as e:
+          err = str(e).lower()
+          if "connection" in err or "reset" in err or "10054" in err or "econnreset" in err or "tcp" in err:
+            print(f"[AVITO] Обрыв соединения с прокси/сайтом (попытка {attempt}/3). Пауза 10 сек…")
+          else:
+            print(f"[AVITO] Ошибка загрузки: {e}")
+          _sleep_with_stop(stop_event, 10)
+      if not loaded:
+        print("[AVITO] Не удалось загрузить страницу после 3 попыток. Проверьте прокси и сеть.")
+        abort_page_loop = True
         break
-      except TimeoutException:
-        print(f"[AVITO] Таймаут загрузки (попытка {attempt}/3). Пауза 10 сек…")
-        _sleep_with_stop(stop_event, 10)
-      except (WebDriverException, OSError, Exception) as e:
-        err = str(e).lower()
-        if "connection" in err or "reset" in err or "10054" in err or "econnreset" in err or "tcp" in err:
-          print(f"[AVITO] Обрыв соединения с прокси/сайтом (попытка {attempt}/3). Пауза 10 сек…")
-        else:
-          print(f"[AVITO] Ошибка загрузки: {e}")
-        _sleep_with_stop(stop_event, 10)
-    if not loaded:
-      print("[AVITO] Не удалось загрузить страницу после 3 попыток. Проверьте прокси и сеть.")
-      break
 
-    # Если Avito не открыл нужную страницу p=..., дальше идти бессмысленно
-    # (обычно это означает, что страниц больше нет и сайт вернул первую/последнюю).
-    current_url = (driver.current_url or "").lower()
-    if page > 1 and f"p={page}" not in current_url:
-      print(
-        f"[AVITO] Страница p={page} не открылась (URL: {driver.current_url}). "
-        "Похоже, страниц больше нет."
-      )
-      break
+      # Если Avito не открыл нужную страницу p=..., дальше идти бессмысленно
+      current_url = (driver.current_url or "").lower()
+      if page > 1 and f"p={page}" not in current_url:
+        print(
+          f"[AVITO] Страница p={page} не открылась (URL: {driver.current_url}). "
+          "Похоже, страниц больше нет."
+        )
+        abort_page_loop = True
+        break
 
-    delay_after_load = random.uniform(load_delay * 0.8, load_delay * 1.2)
-    print(f"[AVITO] Ожидание {delay_after_load:.0f} сек после загрузки…")
-    _sleep_with_stop(stop_event, delay_after_load)
+      delay_after_load = random.uniform(load_delay * 0.8, load_delay * 1.2)
+      print(f"[AVITO] Ожидание {delay_after_load:.0f} сек после загрузки…")
+      _sleep_with_stop(stop_event, delay_after_load)
 
-    if stop_event is not None and stop_event.is_set():
-      print("[AVITO] Остановка парсинга после загрузки страницы.")
-      break
+      if stop_event is not None and stop_event.is_set():
+        print("[AVITO] Остановка парсинга после загрузки страницы.")
+        abort_page_loop = True
+        break
 
-    print("[AVITO] Проверка страницы на ограничение доступа…")
-    blocked, reason = _is_avito_blocked(driver)
-    if blocked:
+      print("[AVITO] Проверка страницы на ограничение доступа…")
+      blocked, reason = _is_avito_blocked(driver)
+      if not blocked:
+        break
+
       msg = f"[AVITO] Обнаружена блокировка/проверка ({reason})."
       print(msg)
-      if raise_on_block:
-        raise AvitoBlockedError(msg)
+      print(
+        f"[AVITO] Попытка {block_round}/{AVITO_BLOCK_MAX_RETRIES_PER_PAGE} на странице {page}. "
+        f"Пауза {AVITO_BLOCK_RETRY_WAIT_SEC} сек (новый IP у прокси), затем снова driver.get…"
+      )
+      if block_round >= AVITO_BLOCK_MAX_RETRIES_PER_PAGE:
+        if raise_on_block:
+          raise AvitoBlockedError(msg)
+        print("[AVITO] Лимит попыток на этой странице — останавливаю парсинг.")
+        abort_page_loop = True
+        break
+      _sleep_with_stop(stop_event, float(AVITO_BLOCK_RETRY_WAIT_SEC))
+
+    if abort_page_loop:
       break
 
     # Иначе фильтры кликаются по пустому DOM → «не найден фильтр», выдача пустая.
