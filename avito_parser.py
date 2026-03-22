@@ -209,37 +209,94 @@ def _filter_search_roots(driver):
   return uniq[:6]
 
 
-def _click_text_option(driver, text, must_be_checkbox=False):
-  """Клик по пункту фильтра. XPath только внутри aside/блока фильтров — глобальный //label на Avito = минуты."""
-  del must_be_checkbox  # на текущей вёрстке чипы фильтров часто <button>, их нельзя пропускать
+def _quick_filter_clickables(driver):
+  """Чипы фильтров: aside + блоки с *filter* в классе (на Avito колонка не всегда <aside>)."""
+  selectors = (
+    "aside label",
+    "aside button",
+    "aside span",
+    "aside div[role]",
+    "[class*='SearchFilters'] label",
+    "[class*='SearchFilters'] span",
+    "[class*='SearchFilters'] button",
+    "[class*='search-filters'] label",
+    "[class*='search-filters'] span",
+    "[class*='filters'] label",
+    "[class*='filters'] span",
+    "[class*='filters'] button",
+    "[class*='Filter'] label",
+    "[class*='Filter'] span",
+    "[class*='Filter'] button",
+  )
+  seen = set()
+  out = []
+  for sel in selectors:
+    try:
+      for el in driver.find_elements(By.CSS_SELECTOR, sel):
+        try:
+          rid = id(el)
+          if rid in seen:
+            continue
+          seen.add(rid)
+          out.append(el)
+        except Exception:
+          continue
+    except Exception:
+      continue
+  return out[:420]
+
+
+def _try_expand_filter_sections(driver):
+  """Раскрыть секции фильтров (часто память/SIM скрыты до клика по заголовку или «Все фильтры»)."""
+  for title in ("Все фильтры", "Ещё фильтры", "Показать все фильтры"):
+    if _click_text_option(driver, title, must_be_checkbox=False, timeout_sec=5):
+      sleep(0.7)
+      break
+  for title in ("Память", "Встроенная память", "Объём памяти", "Память телефона"):
+    _click_text_option(driver, title, must_be_checkbox=False, timeout_sec=4)
+    sleep(0.2)
+  try:
+    for aside in driver.find_elements(By.CSS_SELECTOR, "aside")[:1]:
+      driver.execute_script("arguments[0].scrollTop += 450", aside)
+      sleep(0.2)
+  except Exception:
+    pass
+
+
+def _click_text_option(driver, text, must_be_checkbox=False, timeout_sec=22):
+  """Клик по одному тексту фильтра. timeout_sec — на весь вызов (не на каждый вариант списка)."""
+  del must_be_checkbox
   if not text:
     return False
+  return _click_text_option_multi(driver, [text], timeout_sec=timeout_sec, memory_style=False)
 
-  deadline = time.monotonic() + 25.0  # защита от «тишины» 10+ минут на один пункт
+
+def _click_text_option_multi(driver, texts, timeout_sec=22, memory_style=False):
+  """Один проход по всем строкам-вариантам (128 ГБ, 128, …) — иначе 7×25 с ≈ 3 мин на один фильтр памяти."""
+  if not texts:
+    return False
+
+  deadline = time.monotonic() + float(timeout_sec)
 
   def _timed_out():
     return time.monotonic() > deadline
 
-  normalized_target = _norm_filter_text(text).replace("gb", "гб")
-  variants = [text, text.replace("+", " + "), text.replace("ё", "е"), text.replace("е", "ё")]
   vseen = set()
   vlist = []
-  for v in variants:
-    k = (v or "").strip()
-    if not k or k in vseen:
-      continue
-    vseen.add(k)
-    vlist.append(k)
+  for text in texts:
+    for v in (text, text.replace("+", " + "), text.replace("ё", "е"), text.replace("е", "ё")):
+      k = (v or "").strip()
+      if not k or k in vseen:
+        continue
+      vseen.add(k)
+      vlist.append(k)
 
-  # Быстрый путь: один раз элементы в aside (без тяжёлых // по всему документу)
-  try:
-    quick = driver.find_elements(
-      By.CSS_SELECTOR,
-      "aside label, aside button, aside span, aside div[role=checkbox], aside div[role=switch]",
-    )
-  except Exception:
-    quick = []
-  for elem in quick[:280]:
+  primary = (texts[0] or "").strip()
+  normalized_target = _norm_filter_text(primary).replace("gb", "гб")
+  target_digits = re.sub(r"\D", "", normalized_target)
+
+  quick = _quick_filter_clickables(driver)
+  for elem in quick[:350]:
     if _timed_out():
       return False
     try:
@@ -249,7 +306,6 @@ def _click_text_option(driver, text, must_be_checkbox=False):
       norm_elem = _norm_filter_text(elem_text).replace("gb", "гб")
       if not norm_elem:
         continue
-      target_digits = re.sub(r"\D", "", normalized_target)
       elem_digits = re.sub(r"\D", "", norm_elem)
       for variant in vlist:
         nt = _norm_filter_text(variant).replace("gb", "гб")
@@ -262,6 +318,13 @@ def _click_text_option(driver, text, must_be_checkbox=False):
             target_digits
             and elem_digits == target_digits
             and ("гб" in nt or "gb" in normalized_target)
+          )
+          or (
+            memory_style
+            and target_digits
+            and elem_digits == target_digits
+            and len(target_digits) >= 2
+            and ("гб" in norm_elem or "gb" in norm_elem or len(norm_elem) <= 8)
           )
         )
         if not match:
@@ -291,6 +354,9 @@ def _click_text_option(driver, text, must_be_checkbox=False):
       f"//aside//label[contains(normalize-space(), {lit})]",
       f"//aside//*[self::span or self::div or self::button][contains(normalize-space(), {lit})]",
       f"//aside//*[@role='checkbox' or @role='switch'][contains(., {lit})]",
+      f"//*[contains(@class,'SearchFilters')]//label[contains(normalize-space(), {lit})]",
+      f"//*[contains(@class,'search-filters')]//label[contains(normalize-space(), {lit})]",
+      f"//*[contains(@class,'filters')]//span[contains(normalize-space(), {lit})]",
     ]
     for xp in xps:
       if _timed_out():
@@ -336,20 +402,31 @@ def _click_text_option(driver, text, must_be_checkbox=False):
         norm_elem = _norm_filter_text(elem_text).replace("gb", "гб")
         if not norm_elem:
           continue
-        target_digits = re.sub(r"\D", "", normalized_target)
         elem_digits = re.sub(r"\D", "", norm_elem)
-        match = (
-          norm_elem == normalized_target
-          or normalized_target in norm_elem
-          or norm_elem in normalized_target
-          or (len(norm_elem) > 2 and (norm_elem in normalized_target or normalized_target in norm_elem))
-          or (
-            target_digits
-            and elem_digits == target_digits
-            and ("гб" in normalized_target or "gb" in normalized_target)
-          )
-        )
-        if not match:
+        matched = False
+        for variant in vlist:
+          nt = _norm_filter_text(variant).replace("gb", "гб")
+          if (
+            nt == norm_elem
+            or nt in norm_elem
+            or norm_elem in nt
+            or (len(norm_elem) > 2 and (norm_elem in nt or nt in norm_elem))
+            or (
+              target_digits
+              and elem_digits == target_digits
+              and ("гб" in nt or "gb" in normalized_target)
+            )
+            or (
+              memory_style
+              and target_digits
+              and elem_digits == target_digits
+              and len(target_digits) >= 2
+              and ("гб" in norm_elem or "gb" in norm_elem or len(norm_elem) <= 8)
+            )
+          ):
+            matched = True
+            break
+        if not matched:
           continue
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", elem)
         sleep(0.1)
@@ -375,6 +452,7 @@ def _capacity_variants(value):
       [
         digits,
         f"{digits} ГБ",
+        f"{digits} Гб",
         f"{digits}гб",
         f"{digits} GB",
         f"{digits}GB",
@@ -578,6 +656,8 @@ def _apply_avito_ui_filters(driver, filters):
     pass
   sleep(0.5)
 
+  _try_expand_filter_sections(driver)
+
   print("[AVITO] Применяю расширенные фильтры в интерфейсе…")
   print(
     "[AVITO] Запрошенные фильтры: "
@@ -601,12 +681,7 @@ def _apply_avito_ui_filters(driver, filters):
 
   for value in filters.get("memory", []):
     print(f"[AVITO] Память: ищу «{value}»…")
-    ok = False
-    for option in _capacity_variants(value):
-      if _click_text_option(driver, option, must_be_checkbox=True):
-        ok = True
-        break
-    if ok:
+    if _click_text_option_multi(driver, _capacity_variants(value), timeout_sec=24, memory_style=True):
       applied["memory"] += 1
       print(f"[AVITO] Память: выбрано «{value}»")
       sleep(0.2)
@@ -615,12 +690,7 @@ def _apply_avito_ui_filters(driver, filters):
 
   for value in filters.get("ram", []):
     print(f"[AVITO] RAM: ищу «{value}»…")
-    ok = False
-    for option in _capacity_variants(value):
-      if _click_text_option(driver, option, must_be_checkbox=True):
-        ok = True
-        break
-    if ok:
+    if _click_text_option_multi(driver, _capacity_variants(value), timeout_sec=24, memory_style=True):
       applied["ram"] += 1
       print(f"[AVITO] RAM: выбрано «{value}»")
       sleep(0.2)
@@ -629,12 +699,7 @@ def _apply_avito_ui_filters(driver, filters):
 
   for value in filters.get("sim", []):
     print(f"[AVITO] SIM: ищу «{value}»…")
-    ok = False
-    for option in _sim_variants(value):
-      if _click_text_option(driver, option, must_be_checkbox=True):
-        ok = True
-        break
-    if ok:
+    if _click_text_option_multi(driver, _sim_variants(value), timeout_sec=24, memory_style=False):
       applied["sim"] += 1
       print(f"[AVITO] SIM: выбрано «{value}»")
       sleep(0.2)
@@ -643,12 +708,7 @@ def _apply_avito_ui_filters(driver, filters):
 
   for value in filters.get("colors", []):
     print(f"[AVITO] Цвет: ищу «{value}»…")
-    ok = False
-    for option in _color_variants(value):
-      if _click_text_option(driver, option, must_be_checkbox=True):
-        ok = True
-        break
-    if ok:
+    if _click_text_option_multi(driver, _color_variants(value), timeout_sec=24, memory_style=False):
       applied["colors"] += 1
       print(f"[AVITO] Цвет: выбрано «{value}»")
       sleep(0.2)
@@ -675,12 +735,7 @@ def _apply_avito_ui_filters(driver, filters):
 
   if filters.get("rating_4_plus"):
     print("[AVITO] Рейтинг: ищу «4 звезды и выше»…")
-    ok = False
-    for label in _rating_variants():
-      if _click_text_option(driver, label, must_be_checkbox=True):
-        ok = True
-        break
-    if ok:
+    if _click_text_option_multi(driver, _rating_variants(), timeout_sec=20, memory_style=False):
       applied["rating_4_plus"] += 1
       print("[AVITO] Рейтинг: применён")
     else:
