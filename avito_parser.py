@@ -30,7 +30,8 @@ _QUICK_FILTER_SCAN_CAP = 80
 _ROOT_CANDIDATES_CAP = 90
 
 
-def _filters_to_excel_meta(filters):
+def _filters_to_excel_meta(filters, *, applied_mode: str = "", ui_applied_note: str = ""):
+  """Запрос пользователя + как реально отобрали (UI / текст карточек)."""
   filters = filters or {}
   return {
     "avito_filter_memory": ", ".join(filters.get("memory", [])),
@@ -40,7 +41,125 @@ def _filters_to_excel_meta(filters):
     "avito_filter_condition": ", ".join(filters.get("condition", [])),
     "avito_filter_seller_type": (filters.get("seller_type") or "all"),
     "avito_filter_rating_4_plus": "yes" if filters.get("rating_4_plus") else "no",
+    "avito_filter_applied_mode": applied_mode or "",
+    "avito_ui_applied_note": ui_applied_note or "",
   }
+
+
+def _item_search_blob(item: dict) -> str:
+  parts = [item.get("title") or "", item.get("url") or ""]
+  return " ".join(parts).lower()
+
+
+def _text_matches_capacity(blob: str, values) -> bool:
+  b = blob.replace("\u00a0", " ").lower()
+  b_compact = re.sub(r"\s+", "", b)
+  for v in values or []:
+    d = re.sub(r"\D", "", str(v))
+    if not d or len(d) > 4:
+      continue
+    if re.search(rf"\b{d}\s*(гб|gb)\b", b, re.I):
+      return True
+    if re.search(rf"{d}(гб|gb)", b_compact, re.I):
+      return True
+  return False
+
+
+def _text_matches_sim(blob: str, values) -> bool:
+  b = blob.replace("\u00a0", " ").lower()
+  for v in values or []:
+    s = str(v).lower()
+    if re.search(r"\b1\b", s) and "sim" in s:
+      if re.search(r"(\b1\s*sim\b|1\s*sim|nano|esim|одна\s*sim|one\s*sim|1\s*нано)", b, re.I):
+        return True
+    if re.search(r"\b2\b", s) and "sim" in s:
+      if re.search(r"(\b2\s*sim\b|2\s*sim|dual|две\s*sim)", b, re.I):
+        return True
+    if "sim" in s and len(s) < 22:
+      if re.sub(r"\s+", "", s) in re.sub(r"\s+", "", b):
+        return True
+  return False
+
+
+def _text_matches_color(blob: str, values) -> bool:
+  b = blob.lower()
+  for v in values or []:
+    raw = (v or "").strip().lower()
+    if not raw:
+      continue
+    if raw in b:
+      return True
+    r2 = raw.replace("ё", "е")
+    if r2 in b.replace("ё", "е"):
+      return True
+    if "зел" in raw and ("зел" in b or "green" in b):
+      return True
+    if "красн" in raw and "красн" in b:
+      return True
+    if "син" in raw and "син" in b:
+      return True
+    if "бел" in raw and ("бел" in b or "white" in b):
+      return True
+    if "черн" in raw and ("черн" in b or "black" in b):
+      return True
+  return False
+
+
+def _text_matches_condition(blob: str, values) -> bool:
+  b = blob.lower()
+  for v in values or []:
+    t = (v or "").strip().lower()
+    if t and t in b:
+      return True
+  return False
+
+
+def _need_text_fallback(ui_applied: dict, filters: dict) -> bool:
+  if not filters:
+    return False
+  u = ui_applied or {}
+  if filters.get("memory") and u.get("memory", 0) == 0:
+    return True
+  if filters.get("ram") and u.get("ram", 0) == 0:
+    return True
+  if filters.get("sim") and u.get("sim", 0) == 0:
+    return True
+  if filters.get("colors") and u.get("colors", 0) == 0:
+    return True
+  if filters.get("condition") and u.get("condition", 0) == 0:
+    return True
+  st = str(filters.get("seller_type") or "all").lower()
+  if st != "all" and u.get("seller_type", 0) == 0:
+    return True
+  if filters.get("rating_4_plus") and u.get("rating_4_plus", 0) == 0:
+    return True
+  return False
+
+
+def _post_filter_avito_items_by_text(items: list, filters: dict, ui_applied: dict) -> list:
+  u = ui_applied or {}
+  out = []
+  for item in items:
+    blob = _item_search_blob(item)
+    ok = True
+    if (filters.get("memory") or []) and u.get("memory", 0) == 0:
+      ok = ok and _text_matches_capacity(blob, filters.get("memory"))
+    if (filters.get("ram") or []) and u.get("ram", 0) == 0:
+      ok = ok and _text_matches_capacity(blob, filters.get("ram"))
+    if (filters.get("sim") or []) and u.get("sim", 0) == 0:
+      ok = ok and _text_matches_sim(blob, filters.get("sim"))
+    if (filters.get("colors") or []) and u.get("colors", 0) == 0:
+      ok = ok and _text_matches_color(blob, filters.get("colors"))
+    if (filters.get("condition") or []) and u.get("condition", 0) == 0:
+      ok = ok and _text_matches_condition(blob, filters.get("condition"))
+    st = str(filters.get("seller_type") or "all").lower()
+    if st == "private" and u.get("seller_type", 0) == 0:
+      ok = ok and ("частн" in blob or "private" in blob or "личн" in blob)
+    if st == "company" and u.get("seller_type", 0) == 0:
+      ok = ok and ("компани" in blob or "магазин" in blob or "shop" in blob)
+    if ok:
+      out.append(item)
+  return out
 
 
 def _enrich_items_with_filter_meta(items, filter_meta):
@@ -886,6 +1005,33 @@ def _has_meaningful_avito_ui_filters(filters):
   return False
 
 
+def _describe_applied_mode(filters, ui_applied, text_fallback_ran: bool):
+  """Режим для Excel: ui / ui+text / none + короткая сводка по счётчикам UI."""
+  if not filters or not _has_meaningful_avito_ui_filters(filters):
+    return ("none", "")
+  u = ui_applied or {}
+  bits = []
+  if filters.get("memory"):
+    bits.append(f"memory={u.get('memory', 0)}")
+  if filters.get("ram"):
+    bits.append(f"ram={u.get('ram', 0)}")
+  if filters.get("sim"):
+    bits.append(f"sim={u.get('sim', 0)}")
+  if filters.get("colors"):
+    bits.append(f"colors={u.get('colors', 0)}")
+  if filters.get("condition"):
+    bits.append(f"condition={u.get('condition', 0)}")
+  st = str(filters.get("seller_type") or "all").lower()
+  if st != "all":
+    bits.append(f"seller={u.get('seller_type', 0)}")
+  if filters.get("rating_4_plus"):
+    bits.append(f"rating4+={u.get('rating_4_plus', 0)}")
+  note = "UI: " + ", ".join(bits)
+  if text_fallback_ran:
+    return ("ui+text", note + " | доп. отбор по тексту карточки (title/URL)")
+  return ("ui", note)
+
+
 def _detect_total_pages(driver):
   """Определяет число страниц в текущей выдаче Avito после применения фильтров."""
   max_page = 1
@@ -909,7 +1055,7 @@ def _detect_total_pages(driver):
 
 def _apply_avito_ui_filters(driver, filters):
   if not filters:
-    return
+    return {}
 
   print("[AVITO] Применяю расширенные фильтры в интерфейсе…")
   print(
@@ -1031,6 +1177,7 @@ def _apply_avito_ui_filters(driver, filters):
     f"condition={applied['condition']}, seller={applied['seller_type']}, "
     f"rating4+={applied['rating_4_plus']}"
   )
+  return applied
 
 
 def _get_cards(driver, wait):
@@ -1248,6 +1395,7 @@ def parse_avito(
   all_items = []
   page = 1
   filter_meta = _filters_to_excel_meta(filters)
+  ui_applied = {}
   seen_item_keys = set()
   filtered_base_url = ""
   effective_max_pages = min(max_pages, AVITO_MAX_PAGES_PER_RUN)
@@ -1330,10 +1478,11 @@ def parse_avito(
           print(f"[AVITO] status_callback: {e}")
     if page == 1 and filters:
       try:
-        _apply_avito_ui_filters(driver, filters)
+        ui_applied = _apply_avito_ui_filters(driver, filters) or {}
         filtered_base_url = driver.current_url or ""
       except Exception as e:
         print(f"[AVITO] Не удалось применить часть фильтров: {e}")
+        ui_applied = {}
     if scroll_passes > 0:
       _scroll_page(driver, scroll_passes, scroll_delay, stop_event=stop_event)
 
@@ -1436,6 +1585,21 @@ def parse_avito(
       delay = random.uniform(page_delay * 0.8, page_delay * 1.3)
       print(f"[AVITO] Пауза {delay:.0f} сек перед следующей страницей (обход лимитов)…")
       _sleep_with_stop(stop_event, delay)
+
+  text_fallback_ran = False
+  if filters and _need_text_fallback(ui_applied, filters):
+    before = len(all_items)
+    all_items = _post_filter_avito_items_by_text(all_items, filters, ui_applied)
+    text_fallback_ran = True
+    print(
+      f"[AVITO] Текстовый fallback (UI не применил часть фильтров): было {before} позиций, "
+      f"после отбора по title/URL — {len(all_items)}."
+    )
+
+  mode, mode_note = _describe_applied_mode(filters, ui_applied, text_fallback_ran)
+  final_meta = _filters_to_excel_meta(filters, applied_mode=mode, ui_applied_note=mode_note)
+  for item in all_items:
+    item.update(final_meta)
 
   print(f"[AVITO] Всего объявлений (с повторами): {len(all_items)}")
   return all_items
