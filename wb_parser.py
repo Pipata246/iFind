@@ -11,7 +11,9 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
+from browser_helpers import wait_for_document_ready
 from config import (
+    DOCUMENT_READY_TIMEOUT,
     EXPLICIT_WAIT,
     WB_BASE_URL,
     VPS_LIGHT_MODE,
@@ -234,6 +236,9 @@ def parse_wb(driver, keyword, model, price_min=None, price_max=None, precision=7
             for attempt in range(1, 4):
                 try:
                     driver.get(url)
+                    print(f"[WB] Ожидание готовности страницы (до {DOCUMENT_READY_TIMEOUT} сек)…")
+                    if not wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT):
+                        raise TimeoutException("document.readyState не достиг готовности")
                     loaded = True
                     break
                 except TimeoutException:

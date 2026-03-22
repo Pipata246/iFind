@@ -96,7 +96,9 @@ def _validate_args(args):
 
 def build_driver(headless=True):
   chrome_options = Options()
-  chrome_options.page_load_strategy = "eager"
+  # «eager»/«normal» ждут load/DOMContentLoaded — на медленном прокси driver.get висит до page_load_timeout.
+  # «none»: навигация не блокирует на полной загрузке; готовность ждём в wait_for_document_ready().
+  chrome_options.page_load_strategy = "none"
   chrome_options.add_argument("--disable-blink-features=AutomationControlled")
   chrome_options.add_argument("--no-sandbox")
   chrome_options.add_argument("--disable-dev-shm-usage")
@@ -156,7 +158,10 @@ def build_driver(headless=True):
     )
   except Exception:
     pass
-  driver.set_page_load_timeout(120)
+  # При strategy=none get() обычно не упирается в этот лимит; оставляем запас для refresh и т.п.
+  driver.set_page_load_timeout(180)
+  # Иначе execute_script может «висеть» бесконечно при зависшем Chrome.
+  driver.set_script_timeout(90)
   driver.implicitly_wait(IMPLICIT_WAIT)
   if use_proxy:
     print(f"[Прокси] Используется мобильный прокси: {MOBILE_PROXY_HOST}:{MOBILE_PROXY_PORT}")

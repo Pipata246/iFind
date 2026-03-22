@@ -49,6 +49,9 @@ MOBILE_PROXY_PASS = os.getenv("MOBILE_PROXY_PASS", "t8cfLDzi55")
 IMPLICIT_WAIT = _env_int("IMPLICIT_WAIT", 10)
 EXPLICIT_WAIT = _env_int("EXPLICIT_WAIT", 45)
 
+# После page_load_strategy=none: сколько секунд ждать body + readyState (без ожидания «load»).
+DOCUMENT_READY_TIMEOUT = max(15, _env_int("DOCUMENT_READY_TIMEOUT", 120))
+
 AVITO_BASE_URL = os.getenv("AVITO_BASE_URL", "https://www.avito.ru").rstrip("/")
 WB_BASE_URL = os.getenv("WB_BASE_URL", "https://www.wildberries.ru").rstrip("/")
 

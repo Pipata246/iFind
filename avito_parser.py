@@ -10,11 +10,24 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
-from config import AVITO_BASE_URL, AVITO_MAX_PAGES_PER_RUN, EXPLICIT_WAIT, VPS_LIGHT_MODE
+from browser_helpers import wait_for_document_ready
+from config import (
+  AVITO_BASE_URL,
+  AVITO_MAX_PAGES_PER_RUN,
+  DOCUMENT_READY_TIMEOUT,
+  EXPLICIT_WAIT,
+  VPS_LIGHT_MODE,
+)
 
 
 class AvitoBlockedError(RuntimeError):
   pass
+
+
+# Перебор сотен элементов с elem.is_displayed() даёт тысячи round-trip к драйверу (10+ минут тишины в логах).
+_QUICK_FILTER_COLLECT_CAP = 220
+_QUICK_FILTER_SCAN_CAP = 80
+_ROOT_CANDIDATES_CAP = 90
 
 
 def _filters_to_excel_meta(filters):
@@ -253,18 +266,21 @@ def _quick_filter_clickables(driver):
           continue
     except Exception:
       continue
-  return out[:420]
+  return out[:_QUICK_FILTER_COLLECT_CAP]
 
 
-def _try_expand_filter_sections(driver):
+def _try_expand_filter_sections(driver, filters=None):
   """Раскрыть секции фильтров (часто память/SIM скрыты до клика по заголовку или «Все фильтры»)."""
   for title in ("Все фильтры", "Ещё фильтры", "Показать все фильтры"):
     if _click_text_option(driver, title, must_be_checkbox=False, timeout_sec=5):
       sleep(0.7)
       break
-  for title in ("Память", "Встроенная память", "Объём памяти", "Память телефона"):
-    _click_text_option(driver, title, must_be_checkbox=False, timeout_sec=4)
-    sleep(0.2)
+  # Раньше: 4 заголовка × полный скан DOM = тысячи is_displayed() и 10+ минут без логов.
+  mem_needed = bool(filters and (filters.get("memory") or filters.get("ram")))
+  if mem_needed:
+    for title in ("Память", "Встроенная память"):
+      _click_text_option(driver, title, must_be_checkbox=False, timeout_sec=5)
+      sleep(0.2)
   try:
     for aside in driver.find_elements(By.CSS_SELECTOR, "aside")[:1]:
       driver.execute_script("arguments[0].scrollTop += 450", aside)
@@ -306,7 +322,7 @@ def _click_text_option_multi(driver, texts, timeout_sec=22, memory_style=False):
   target_digits = re.sub(r"\D", "", normalized_target)
 
   quick = _quick_filter_clickables(driver)
-  for elem in quick[:350]:
+  for elem in quick[:_QUICK_FILTER_SCAN_CAP]:
     if _timed_out():
       return False
     try:
@@ -402,7 +418,7 @@ def _click_text_option_multi(driver, texts, timeout_sec=22, memory_style=False):
       )
     except Exception:
       continue
-    for elem in candidates[:180]:
+    for elem in candidates[:_ROOT_CANDIDATES_CAP]:
       if _timed_out():
         return False
       try:
@@ -652,6 +668,18 @@ def _apply_avito_ui_filters(driver, filters):
   if not filters:
     return
 
+  print("[AVITO] Применяю расширенные фильтры в интерфейсе…")
+  print(
+    "[AVITO] Запрошенные фильтры: "
+    f"memory={filters.get('memory') or []}, "
+    f"ram={filters.get('ram') or []}, "
+    f"sim={filters.get('sim') or []}, "
+    f"colors={filters.get('colors') or []}, "
+    f"condition={filters.get('condition') or []}, "
+    f"seller_type={filters.get('seller_type') or 'all'}, "
+    f"rating_4_plus={bool(filters.get('rating_4_plus'))}"
+  )
+
   # Дождаться отрисовки и прокрутить к колонке фильтров (левый aside)
   sleep(1.8)
   try:
@@ -666,19 +694,8 @@ def _apply_avito_ui_filters(driver, filters):
     pass
   sleep(0.5)
 
-  _try_expand_filter_sections(driver)
-
-  print("[AVITO] Применяю расширенные фильтры в интерфейсе…")
-  print(
-    "[AVITO] Запрошенные фильтры: "
-    f"memory={filters.get('memory') or []}, "
-    f"ram={filters.get('ram') or []}, "
-    f"sim={filters.get('sim') or []}, "
-    f"colors={filters.get('colors') or []}, "
-    f"condition={filters.get('condition') or []}, "
-    f"seller_type={filters.get('seller_type') or 'all'}, "
-    f"rating_4_plus={bool(filters.get('rating_4_plus'))}"
-  )
+  print("[AVITO] Раскрываю секции фильтров (если нужно)…")
+  _try_expand_filter_sections(driver, filters)
   applied = {
     "memory": 0,
     "ram": 0,
@@ -1013,6 +1030,9 @@ def parse_avito(
     for attempt in range(1, 4):
       try:
         driver.get(url)
+        print(f"[AVITO] Ожидание готовности страницы (до {DOCUMENT_READY_TIMEOUT} сек, без ожидания полной загрузки ресурсов)…")
+        if not wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT, stop_event):
+          raise TimeoutException("document.readyState не достиг готовности")
         loaded = True
         break
       except TimeoutException:
@@ -1047,6 +1067,7 @@ def parse_avito(
       print("[AVITO] Остановка парсинга после загрузки страницы.")
       break
 
+    print("[AVITO] Проверка страницы на ограничение доступа…")
     blocked, reason = _is_avito_blocked(driver)
     if blocked:
       msg = f"[AVITO] Обнаружена блокировка/проверка ({reason})."
