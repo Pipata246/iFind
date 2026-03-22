@@ -31,6 +31,9 @@ BTN_EDIT = "Изменить"
 BTN_MANUAL_AVITO_MY = "✅ Парсинг с моими настройками"
 BTN_MANUAL_AVITO_MANUAL = "✍️ Задать вручную"
 BTN_STOP_PARSING = "⛔ Остановить парсинг"
+# Только на время одного запуска (не сохраняется в БД)
+BTN_PARSE_SCOPE_TODAY = "📅 Только сегодняшние объявления"
+BTN_PARSE_SCOPE_ALL = "📋 Все объявления"
 
 
 def build_supabase_client() -> Client:
@@ -88,6 +91,14 @@ def build_edit_keyboard():
 
 def build_stop_keyboard():
   keyboard = [[KeyboardButton(BTN_STOP_PARSING)]]
+  return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True, one_time_keyboard=False)
+
+
+def build_parse_scope_keyboard():
+  keyboard = [
+    [KeyboardButton(BTN_PARSE_SCOPE_TODAY), KeyboardButton(BTN_PARSE_SCOPE_ALL)],
+    [KeyboardButton(BTN_CANCEL)],
+  ]
   return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True, one_time_keyboard=False)
 
 
@@ -152,6 +163,29 @@ def _format_list(val):
   return str(val)
 
 
+def _ru_pages_phrase(n: int) -> str:
+  """Склонение «N страниц» для фразы «Буду парсить …»."""
+  n = abs(int(n))
+  if n % 10 == 1 and n % 100 != 11:
+    return f"{n} страницу"
+  if 2 <= n % 10 <= 4 and (n % 100 < 10 or n % 100 >= 20):
+    return f"{n} страницы"
+  return f"{n} страниц"
+
+
+def _format_avito_ready_bot_message(payload: dict) -> str:
+  filters_ok = bool(payload.get("filters_applied"))
+  d = int(payload.get("detected_pages") or 1)
+  n = int(payload.get("pages_to_parse") or 1)
+  head = "Открыл Avito, фильтры применены." if filters_ok else "Открыл Avito."
+  return (
+    f"{head}\n"
+    f"Найдено страниц в выдаче: {d}.\n"
+    f"Буду парсить {_ru_pages_phrase(n)}.\n"
+    "Начало парсинга."
+  )
+
+
 def format_settings_for_user(settings: dict):
   if not settings:
     return "Настройки не заданы."
@@ -169,7 +203,6 @@ def format_settings_for_user(settings: dict):
     f"• Состояние: {_format_list(settings.get('condition'))}\n"
     f"• Продавцы: {'-' if not settings.get('seller_type') or settings.get('seller_type') == 'all' else settings.get('seller_type')}\n"
     f"• Только 4 звезды и выше: {'да' if settings.get('rating_4_plus') is True else '-'}\n"
-    f"• WB только сегодняшние: {'да' if settings.get('wb_today_only') is True else '-'}\n"
     f"• Точность парсинга: {settings.get('precision') or '-'}"
   )
 
@@ -222,7 +255,20 @@ async def send_excel_files_from_supabase(update: Update, context: ContextTypes.D
       print(f"[Supabase] Ошибка отправки файла: {e}")
 
 
-async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFAULT_TYPE, settings: dict):
+async def ask_parse_scope_before_run(update: Update, context: ContextTypes.DEFAULT_TYPE, settings: dict):
+  """Перед запуском спрашиваем: только сегодня или все (только в памяти процесса, не в БД)."""
+  context.user_data["awaiting_parse_scope"] = {"settings": dict(settings)}
+  await update.message.reply_text(
+    "Какие объявления собрать в этом запуске?\n"
+    f"• «{BTN_PARSE_SCOPE_TODAY}» — на карточке должна быть дата «сегодня» или «N часов/минут назад».\n"
+    f"• «{BTN_PARSE_SCOPE_ALL}» — без фильтра по дате.",
+    reply_markup=build_parse_scope_keyboard(),
+  )
+
+
+async def run_avito_parsing_and_store(
+  update: Update, context: ContextTypes.DEFAULT_TYPE, settings: dict, today_only: bool = False
+):
   # Импортируем локально, чтобы не тянуть Selenium при старте бота
   from main import build_driver
   from avito_parser import AvitoBlockedError, parse_avito
@@ -251,16 +297,31 @@ async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFA
   stop_event = threading.Event()
   context.user_data["active_parse"] = {"platform": "avito", "stop_event": stop_event, "driver": None}
 
-  await update.message.reply_text(
-    "Идет парсинг Avito. Подождите, пока бот соберет все данные…",
-    reply_markup=build_stop_keyboard(),
-  )
+  await update.message.reply_text("Запуск…", reply_markup=build_stop_keyboard())
+
+  loop = asyncio.get_running_loop()
+
+  async def _emit_avito_ready(payload: dict):
+    await update.message.reply_text(
+      _format_avito_ready_bot_message(payload),
+      reply_markup=build_stop_keyboard(),
+    )
 
   def _sync_once():
     driver = None
     try:
       driver = build_driver(headless=True)
       context.user_data["active_parse"]["driver"] = driver
+
+      def _status_callback(payload: dict):
+        if payload.get("phase") != "ready":
+          return
+        fut = asyncio.run_coroutine_threadsafe(_emit_avito_ready(payload), loop)
+        try:
+          fut.result(timeout=120)
+        except Exception as e:
+          print(f"[bot] Сообщение о выдаче: {e}")
+
       items = parse_avito(
         driver,
         keyword,
@@ -272,6 +333,8 @@ async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFA
         filters=filters,
         stop_event=stop_event,
         raise_on_block=True,
+        today_only=today_only,
+        status_callback=_status_callback,
       )
       if stop_event.is_set():
         return None
@@ -352,13 +415,13 @@ async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFA
 
   if stop_event.is_set():
     await update.message.reply_text(
-      "Парсинг остановлен пользователем. Загружаю Excel в БД…",
+      "Парсинг остановлен. Загружаю Excel в БД…",
       reply_markup=build_main_keyboard(),
     )
   else:
-    await update.message.reply_text("Парсинг готов. Загружаю Excel в БД…", reply_markup=build_main_keyboard())
+    await update.message.reply_text("Парсинг завершен.", reply_markup=build_main_keyboard())
   await asyncio.to_thread(upload_excel_file_to_supabase, supabase, telegram_id, filepath)
-  await update.message.reply_text("Excel сохранен ✅ Откройте «📄 Excel файлы», чтобы скачать.", reply_markup=build_main_keyboard())
+  await update.message.reply_text("Excel сохранен ✅ «📄 Excel файлы».", reply_markup=build_main_keyboard())
 
 
 def get_user_settings(client: Client, telegram_id: int):
@@ -394,7 +457,6 @@ def upsert_user_settings(client: Client, telegram_id: int, settings: dict):
     # NULL/None = "значение по умолчанию" (фильтр не применяется)
     "seller_type": settings.get("seller_type"),
     "rating_4_plus": settings.get("rating_4_plus"),
-    "wb_today_only": bool(settings.get("wb_today_only")),
     "precision": settings.get("precision") or 7,
     "updated_at": now_iso,
   }
@@ -455,6 +517,29 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return
 
+  # Выбор «только сегодня / все» перед одним запуском парсинга (не хранится в БД)
+  pending_scope = context.user_data.get("awaiting_parse_scope")
+  if pending_scope:
+    if user_text == BTN_CANCEL:
+      context.user_data.pop("awaiting_parse_scope", None)
+      await update.message.reply_text("Запуск парсинга отменён.", reply_markup=build_main_keyboard())
+      return
+    if user_text == BTN_PARSE_SCOPE_TODAY:
+      settings = pending_scope.get("settings") or {}
+      context.user_data.pop("awaiting_parse_scope", None)
+      await run_avito_parsing_and_store(update, context, settings, today_only=True)
+      return
+    if user_text == BTN_PARSE_SCOPE_ALL:
+      settings = pending_scope.get("settings") or {}
+      context.user_data.pop("awaiting_parse_scope", None)
+      await run_avito_parsing_and_store(update, context, settings, today_only=False)
+      return
+    await update.message.reply_text(
+      f"Нажмите «{BTN_PARSE_SCOPE_TODAY}», «{BTN_PARSE_SCOPE_ALL}» или «{BTN_CANCEL}».",
+      reply_markup=build_parse_scope_keyboard(),
+    )
+    return
+
   # Мастер-настройки (без inline-кнопок): хранится в context.user_data
   wizard = context.user_data.get("wizard")
   if wizard:
@@ -496,7 +581,6 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
           "condition": [],
           "seller_type": None,
           "rating_4_plus": None,
-          "wb_today_only": False,
           "precision": 7,
         }
       else:
@@ -863,7 +947,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Если настройка была запрошена из ручного режима — запускаем парсинг сразу.
         if context.user_data.get("after_wizard_action") == "run_avito":
           context.user_data.pop("after_wizard_action", None)
-          await run_avito_parsing_and_store(update, context, draft)
+          await ask_parse_scope_before_run(update, context, draft)
           return
         return
       try:
@@ -897,7 +981,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
       # Если настройка была запрошена из ручного режима — запускаем парсинг сразу.
       if context.user_data.get("after_wizard_action") == "run_avito":
         context.user_data.pop("after_wizard_action", None)
-        await run_avito_parsing_and_store(update, context, draft)
+        await ask_parse_scope_before_run(update, context, draft)
         return
 
       return
@@ -945,7 +1029,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
           )
           return
         context.user_data.pop("manual", None)
-        await run_avito_parsing_and_store(update, context, settings)
+        await ask_parse_scope_before_run(update, context, settings)
         return
       if user_text == BTN_MANUAL_AVITO_MANUAL:
         base = get_user_settings(supabase, telegram_id) or {}
@@ -966,7 +1050,6 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
           "condition": base.get("condition") or [],
           "seller_type": base.get("seller_type"),
           "rating_4_plus": base.get("rating_4_plus"),
-          "wb_today_only": bool(base.get("wb_today_only")),
           "precision": int(base.get("precision") or 7),
         }
         context.user_data.pop("manual", None)

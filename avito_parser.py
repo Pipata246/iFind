@@ -10,7 +10,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
-from config import AVITO_BASE_URL, EXPLICIT_WAIT, VPS_LIGHT_MODE
+from config import AVITO_BASE_URL, AVITO_MAX_PAGES_PER_RUN, EXPLICIT_WAIT, VPS_LIGHT_MODE
 
 
 class AvitoBlockedError(RuntimeError):
@@ -315,6 +315,21 @@ def _build_page_url(base_url, page):
   return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
 
 
+def _has_meaningful_avito_ui_filters(filters):
+  """Есть ли смысловые фильтры в интерфейсе (не только значения по умолчанию)."""
+  if not filters:
+    return False
+  if filters.get("memory") or filters.get("ram") or filters.get("sim"):
+    return True
+  if filters.get("colors") or filters.get("condition"):
+    return True
+  if str(filters.get("seller_type") or "all").lower() != "all":
+    return True
+  if filters.get("rating_4_plus"):
+    return True
+  return False
+
+
 def _detect_total_pages(driver):
   """Определяет число страниц в текущей выдаче Avito после применения фильтров."""
   max_page = 1
@@ -478,6 +493,39 @@ def _get_cards(driver, wait):
   return []
 
 
+def _extract_card_date_text_selenium(card):
+  """Текст даты размещения с карточки Avito (если есть)."""
+  selectors = [
+    "[data-marker='item-date']",
+    "[class*='item-date']",
+    "[class*='iva-item-date']",
+  ]
+  for sel in selectors:
+    try:
+      el = card.find_element(By.CSS_SELECTOR, sel)
+      t = (el.text or "").strip()
+      if t:
+        return t
+    except Exception:
+      continue
+  return ""
+
+
+def _is_avito_today_text(text):
+  """Объявление «за сегодня» по подписи времени на карточке."""
+  s = (text or "").strip().lower()
+  if not s:
+    return False
+  if "вчера" in s or "yesterday" in s:
+    return False
+  if "сегодня" in s or "today" in s:
+    return True
+  # «N часов/минут/секунд назад» на Avito обычно означает сегодня
+  if re.search(r"\d+\s*(час|часа|часов|мин|минут|минуты|сек|секунд|секунды)", s):
+    return True
+  return False
+
+
 def _parse_cards_from_html(driver):
   try:
     html = driver.page_source
@@ -501,6 +549,7 @@ def _parse_cards_from_html(driver):
       container = link.find_parent("div")
     price = None
     city_text = ""
+    date_text = ""
     if container is not None:
       price_tag = container.select_one(
         "[data-marker='item-price'] [data-marker='item-price-value'], "
@@ -511,6 +560,10 @@ def _parse_cards_from_html(driver):
       city_tag = container.select_one("[data-marker='item-location']")
       if city_tag:
         city_text = city_tag.get_text(" ", strip=True)
+      date_tag = container.select_one("[data-marker='item-date']") or container.select_one(
+        "[class*='item-date']"
+      )
+      date_text = (date_tag.get_text(" ", strip=True) if date_tag else "") or ""
 
     items.append(
       {
@@ -519,6 +572,7 @@ def _parse_cards_from_html(driver):
         "price": price,
         "url": href,
         "city": city_text or None,
+        "date_text": date_text or None,
       }
     )
     seen_urls.add(href)
@@ -562,6 +616,8 @@ def _parse_cards_to_items(cards, city, price_min, price_max):
       except Exception:
         pass
 
+      date_text = _extract_card_date_text_selenium(card)
+
       # Фильтр по городу делаем на уровне URL (/samara/...), а не по тексту карточки.
       # В карточках город может быть указан как район/пригород и давать ложные отсеивания.
       if price_min is not None and price is not None and price < price_min:
@@ -577,6 +633,7 @@ def _parse_cards_to_items(cards, city, price_min, price_max):
         "price": price,
         "url": href,
         "city": city_text or None,
+        "date_text": date_text or None,
       })
       stats["parsed_ok"] += 1
     except Exception:
@@ -596,6 +653,8 @@ def parse_avito(
   filters=None,
   stop_event=None,
   raise_on_block=False,
+  today_only=False,
+  status_callback=None,
 ):
   """Поэтапно: одна страница → пауза → скролл по шагам → сбор → длинная пауза → следующая страница."""
   params = _precision_params(precision)
@@ -610,8 +669,10 @@ def parse_avito(
   filter_meta = _filters_to_excel_meta(filters)
   seen_item_keys = set()
   filtered_base_url = ""
-  effective_max_pages = max_pages
+  effective_max_pages = min(max_pages, AVITO_MAX_PAGES_PER_RUN)
+  detected_pages = 1
   fallback_without_ui_filters_done = False
+  parse_scope_announced = False
 
   # Небольшая пауза перед первым запросом, чтобы не бить сайт сразу
   if page == 1:
@@ -683,9 +744,6 @@ def parse_avito(
       try:
         _apply_avito_ui_filters(driver, filters)
         filtered_base_url = driver.current_url or ""
-        detected_pages = _detect_total_pages(driver)
-        effective_max_pages = min(max_pages, max(1, detected_pages))
-        print(f"[AVITO] Страниц по текущим фильтрам: {detected_pages}. Буду парсить до {effective_max_pages}.")
       except Exception as e:
         print(f"[AVITO] Не удалось применить часть фильтров: {e}")
     if scroll_passes > 0:
@@ -721,6 +779,29 @@ def parse_avito(
         break
       print(f"[AVITO] Страница {page}: fallback HTML, найдено {len(items)} карточек")
 
+    # После успешной первой страницы (есть карточки): число страниц в выдаче + лимит за запуск.
+    # Не вызываем до fallback «без UI-фильтров», чтобы не слать в бот неверные цифры.
+    if page == 1 and not parse_scope_announced:
+      detected_pages = _detect_total_pages(driver)
+      effective_max_pages = min(max_pages, max(1, detected_pages), AVITO_MAX_PAGES_PER_RUN)
+      print(
+        f"[AVITO] Страниц в выдаче: {detected_pages}. "
+        f"Буду парсить {effective_max_pages} стр. (макс. {AVITO_MAX_PAGES_PER_RUN} за запуск, precision ≤ {max_pages})."
+      )
+      if status_callback:
+        try:
+          status_callback(
+            {
+              "phase": "ready",
+              "detected_pages": int(detected_pages),
+              "pages_to_parse": int(effective_max_pages),
+              "filters_applied": _has_meaningful_avito_ui_filters(filters),
+            }
+          )
+        except Exception as e:
+          print(f"[AVITO] status_callback: {e}")
+      parse_scope_announced = True
+
     if price_min is not None or price_max is not None:
       filtered = []
       for item in items:
@@ -744,11 +825,21 @@ def parse_avito(
       print("[AVITO] На следующей странице нет новых объявлений. Останавливаюсь.")
       break
 
+    if today_only:
+      before = len(unique_items)
+      unique_items = [it for it in unique_items if _is_avito_today_text(it.get("date_text"))]
+      dropped = before - len(unique_items)
+      if dropped:
+        print(f"[AVITO] Режим «только сегодня»: отфильтровано {dropped} объявлений (нет даты / не сегодня).")
+
     all_items.extend(_enrich_items_with_filter_meta(unique_items, filter_meta))
+    # Не выходим из-за «мало карточек», если ещё есть страницы по пагинации (иначе обрыв на 1-й странице).
     if not used_html_fallback and len(cards) < 20:
-      break
+      if page >= effective_max_pages:
+        break
     if used_html_fallback and len(items) < 15:
-      break
+      if page >= effective_max_pages:
+        break
     page += 1
     if page > effective_max_pages:
       print("[AVITO] Достиг конец страниц по примененным фильтрам.")
