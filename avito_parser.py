@@ -2079,25 +2079,48 @@ def parse_avito(
     if abort_page_loop:
       break
 
-    # Иначе фильтры кликаются по пустому DOM → «не найден фильтр», выдача пустая.
-    shell_ok = _wait_for_avito_listing_shell(driver, timeout_sec=50, stop_event=stop_event)
-    if not shell_ok:
-      _log_avito_empty_page_probe(driver)
-      print("[AVITO] Первая попытка: выдача в DOM не появилась — делаю refresh и жду снова…")
-      try:
-        driver.refresh()
-        if not wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT, stop_event):
-          print("[AVITO] После refresh document.readyState не готов — всё равно продолжаю.")
-        _sleep_with_stop(stop_event, 2.0)
-      except Exception as e:
-        print(f"[AVITO] Ошибка refresh: {e}")
-      shell_ok = _wait_for_avito_listing_shell(driver, timeout_sec=45, stop_event=stop_event)
-    if not shell_ok:
+    # Критично: НЕ продолжаем, пока не появились карточки и (для стр.1 с фильтрами) панель фильтров.
+    # Иначе клики по фильтрам идут в пустой DOM и фильтры «не находятся».
+    need_filters_panel = bool(
+      page == 1 and filters and not fallback_without_ui_filters_done and _has_meaningful_avito_ui_filters(filters)
+    )
+    dom_ready = False
+    for dom_try in range(1, 4):
+      shell_ok = _wait_for_avito_listing_shell(driver, timeout_sec=50 if dom_try == 1 else 35, stop_event=stop_event)
+      filters_panel_ok = True
+      if need_filters_panel:
+        filters_panel_ok = _wait_for_avito_filters_panel(
+          driver, timeout_sec=35 if dom_try == 1 else 22, stop_event=stop_event
+        )
+      if shell_ok and filters_panel_ok:
+        dom_ready = True
+        if dom_try > 1:
+          print(f"[AVITO] DOM готов после перезагрузки (попытка {dom_try}/3).")
+        break
       _log_avito_empty_page_probe(driver)
       print(
-        "[AVITO] Долго нет карточек/фильтров в DOM — продолжаю, как есть "
-        "(медленная сеть, антибот или другая вёрстка). Смотрите [AVITO][probe] выше."
+        f"[AVITO] DOM не готов (попытка {dom_try}/3): "
+        f"cards={'ok' if shell_ok else 'none'}, filters_panel={'ok' if filters_panel_ok else 'none'}."
       )
+      if dom_try >= 3:
+        break
+      print("[AVITO] Перезагружаю страницу и жду DOM снова…")
+      try:
+        # Полный перезаход надёжнее refresh при сетевых ERR_TUNNEL/прокси-сбоях.
+        driver.get(url)
+        if not wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT, stop_event):
+          print("[AVITO] После перезахода document.readyState не готов — пробую дальше.")
+        _sleep_with_stop(stop_event, 2.5)
+      except Exception as e:
+        print(f"[AVITO] Ошибка перезахода на страницу: {e}")
+
+    if not dom_ready:
+      print(
+        "[AVITO] Не удалось получить карточки/панель фильтров после 3 перезаходов. "
+        "Останавливаю текущий прогон, чтобы не парсить неверную выдачу."
+      )
+      abort_page_loop = True
+      break
 
     wait = WebDriverWait(driver, EXPLICIT_WAIT)
     # КРИТИЧНО: после fallback «без UI» нельзя снова жать фильтры — иначе снова 0 карточек.
