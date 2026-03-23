@@ -662,14 +662,26 @@ def _js_click_filter_option(driver, raw_text: str, mode: str) -> bool:
         function clickSmart(el){
           if (!el) return false;
           try { el.scrollIntoView({block:'center', behavior:'instant'}); } catch (e1) {}
+          var requireInput = (mode !== 'text' && mode !== 'header');
           var p = el;
           for (var i = 0; i < 10 && p; i++) {
             var inp = p.querySelector && p.querySelector('input[type="checkbox"], input[type="radio"]');
             if (inp) {
-              try { inp.click(); return true; } catch (e2) {}
+              try {
+                var before = !!inp.checked;
+                inp.click();
+                var after = !!inp.checked;
+                if (after !== before) return true;
+                // Иногда checked меняется после клика по label.
+                try { p.click(); } catch (e2x) {}
+                var after2 = !!inp.checked;
+                if (after2 !== before) return true;
+                // Если состояние не поменялось — считаем, что фильтр не применился.
+              } catch (e2) {}
             }
             p = p.parentElement;
           }
+          if (requireInput) return false;
           try { el.click(); return true; } catch (e3) {
             try {
               el.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window}));
@@ -1520,6 +1532,7 @@ def _apply_avito_ui_filters(driver, filters, stop_event=None):
     return {}
 
   print("[AVITO] Применяю расширенные фильтры в интерфейсе…")
+  pre_apply_url = driver.current_url or ""
   print(
     "[AVITO] Запрошенные фильтры: "
     f"memory={filters.get('memory') or []}, "
@@ -1650,7 +1663,20 @@ def _apply_avito_ui_filters(driver, filters, stop_event=None):
     print("[AVITO] Нажал кнопку применения фильтров: 'Показать ... объявлений'.")
   else:
     print("[AVITO] Кнопка 'Показать ... объявлений' не найдена. Продолжаю без принудительного клика.")
-  sleep(1.5)
+  # Дождаться обновления URL после применения (обычно появляется f= / localPriority)
+  url_changed = False
+  for _ in range(12):
+    cur = driver.current_url or ""
+    if cur and cur != pre_apply_url and ("f=" in cur or "localPriority=" in cur):
+      url_changed = True
+      break
+    sleep(0.5)
+  if not url_changed and _has_meaningful_avito_ui_filters(filters):
+    print(
+      "[AVITO] После кликов URL не получил f=/localPriority. "
+      "Вероятно, кликнули не в реальные чекбоксы фильтров."
+    )
+  sleep(1.0)
   print(
     "[AVITO] Фильтры применены: "
     f"memory={applied['memory']}, ram={applied['ram']}, sim={applied['sim']}, colors={applied['colors']}, "
