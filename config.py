@@ -63,6 +63,6 @@ AVITO_MAX_PAGES_PER_RUN = max(1, _env_int("AVITO_MAX_PAGES_PER_RUN", 5))
 
 # При капче/блокировке на странице: столько раз ждём (смена IP у моб. прокси) и перезагружаем URL.
 # Счётчик сбрасывается на каждой новой странице выдачи.
-AVITO_BLOCK_MAX_RETRIES_PER_PAGE = max(1, _env_int("AVITO_BLOCK_MAX_RETRIES_PER_PAGE", 3))
+AVITO_BLOCK_MAX_RETRIES_PER_PAGE = max(1, _env_int("AVITO_BLOCK_MAX_RETRIES_PER_PAGE", 5))
 AVITO_BLOCK_RETRY_WAIT_SEC = max(10, _env_int("AVITO_BLOCK_RETRY_WAIT_SEC", 130))
 

@@ -205,6 +205,42 @@ async def _emit_avito_parse_status(update: Update, payload: dict):
       "Страница открыта. Применяю фильтры…",
       reply_markup=build_stop_keyboard(),
     )
+  elif phase == "page_loading":
+    page = int(payload.get("page") or 1)
+    pages = int(payload.get("pages_to_parse") or 1)
+    round_no = int(payload.get("block_round") or 1)
+    round_max = int(payload.get("block_round_max") or 3)
+    await update.message.reply_text(
+      f"Avito: загружаю страницу {page}/{pages} (раунд защиты {round_no}/{round_max})…",
+      reply_markup=build_stop_keyboard(),
+    )
+  elif phase == "block_detected":
+    page = int(payload.get("page") or 1)
+    reason = str(payload.get("reason") or "unknown")
+    round_no = int(payload.get("block_round") or 1)
+    round_max = int(payload.get("block_round_max") or 3)
+    await update.message.reply_text(
+      f"Avito блокировка ({reason}) на странице {page}. Попытка {round_no}/{round_max}.",
+      reply_markup=build_stop_keyboard(),
+    )
+  elif phase == "block_retry_wait":
+    page = int(payload.get("page") or 1)
+    wait_sec = int(payload.get("wait_sec") or 130)
+    next_round = int(payload.get("next_round") or 2)
+    round_max = int(payload.get("block_round_max") or 3)
+    await update.message.reply_text(
+      f"Жду {wait_sec} сек для нового IP (страница {page}), затем раунд {next_round}/{round_max}.",
+      reply_markup=build_stop_keyboard(),
+    )
+  elif phase == "block_give_up":
+    page = int(payload.get("page") or 1)
+    reason = str(payload.get("reason") or "unknown")
+    cnt = int(payload.get("collected_items") or 0)
+    await update.message.reply_text(
+      f"На странице {page} не удалось обойти блокировку ({reason}). "
+      f"Завершаю текущий запуск с уже собранными объявлениями: {cnt}.",
+      reply_markup=build_stop_keyboard(),
+    )
 
 
 def format_settings_for_user(settings: dict):
@@ -346,7 +382,14 @@ async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFA
 
       def _status_callback(payload: dict):
         ph = payload.get("phase")
-        if ph not in ("ready", "applying_filters"):
+        if ph not in (
+          "ready",
+          "applying_filters",
+          "page_loading",
+          "block_detected",
+          "block_retry_wait",
+          "block_give_up",
+        ):
           return
         _notify(payload)
 

@@ -348,6 +348,13 @@ def _is_avito_blocked(driver):
   Раньше использовали ``body.text``: на тяжёлой выдаче Selenium долго считает видимый текст
   (минуты без новых логов и без прогресса в боте). Берём короткий срез HTML в браузере.
   """
+  # Если выдача уже есть, считаем страницу рабочей даже при наличии слова "captcha" в скриптах/ресурсах.
+  try:
+    if _avito_listing_shell_present(driver):
+      return False, ""
+  except Exception:
+    pass
+
   try:
     snippet = driver.execute_script(
       "return (document.documentElement && document.documentElement.outerHTML || '')"
@@ -357,18 +364,34 @@ def _is_avito_blocked(driver):
     return False, ""
   if not snippet:
     return False, ""
+  # "captcha" часто встречается в js/метриках даже на обычной странице; используем только явные признаки.
   blocked_markers = (
     "капча",
-    "captcha",
     "подтвердите, что вы не робот",
     "доступ ограничен",
     "проблема с ip",
     "слишком много запросов",
     "подозрительная активность",
+    "доступ с вашего ip временно ограничен",
   )
   for marker in blocked_markers:
     if marker in snippet:
       return True, marker
+  # Отдельно и строже: captcha только если есть challenge-формы/текст на странице.
+  if "captcha" in snippet:
+    try:
+      hard = driver.execute_script(
+        """
+        var s = ((document.body && document.body.innerText) || '').toLowerCase();
+        var hasText = s.indexOf('captcha') !== -1 || s.indexOf('капча') !== -1 || s.indexOf('не робот') !== -1;
+        var hasChallenge = !!document.querySelector('form[action*="captcha"], iframe[src*="captcha"], [id*="captcha"], [class*="captcha"]');
+        return !!(hasText || hasChallenge);
+        """
+      )
+      if hard:
+        return True, "captcha"
+    except Exception:
+      pass
   return False, ""
 
 
@@ -1932,6 +1955,19 @@ def parse_avito(
         )
       else:
         print(f"[AVITO] Страница {page}/{max_pages}: загрузка…")
+      if status_callback:
+        try:
+          status_callback(
+            {
+              "phase": "page_loading",
+              "page": int(page),
+              "pages_to_parse": int(max_pages),
+              "block_round": int(block_round),
+              "block_round_max": int(AVITO_BLOCK_MAX_RETRIES_PER_PAGE),
+            }
+          )
+        except Exception as e:
+          print(f"[AVITO] status_callback: {e}")
 
       loaded = False
       for attempt in range(1, 4):
@@ -1986,16 +2022,58 @@ def parse_avito(
 
       msg = f"[AVITO] Обнаружена блокировка/проверка ({reason})."
       print(msg)
+      if status_callback:
+        try:
+          status_callback(
+            {
+              "phase": "block_detected",
+              "page": int(page),
+              "reason": str(reason or ""),
+              "block_round": int(block_round),
+              "block_round_max": int(AVITO_BLOCK_MAX_RETRIES_PER_PAGE),
+            }
+          )
+        except Exception as e:
+          print(f"[AVITO] status_callback: {e}")
       print(
         f"[AVITO] Попытка {block_round}/{AVITO_BLOCK_MAX_RETRIES_PER_PAGE} на странице {page}. "
         f"Пауза {AVITO_BLOCK_RETRY_WAIT_SEC} сек (новый IP у прокси), затем снова driver.get…"
       )
       if block_round >= AVITO_BLOCK_MAX_RETRIES_PER_PAGE:
-        if raise_on_block:
+        if status_callback:
+          try:
+            status_callback(
+              {
+                "phase": "block_give_up",
+                "page": int(page),
+                "reason": str(reason or ""),
+                "collected_items": int(len(all_items)),
+              }
+            )
+          except Exception as e:
+            print(f"[AVITO] status_callback: {e}")
+        # Не сбрасываем весь прогон, если уже есть данные с предыдущих страниц.
+        # Фатально падаем только если блок на первой странице и ещё нечего отдавать.
+        if raise_on_block and page <= 1 and not all_items:
           raise AvitoBlockedError(msg)
-        print("[AVITO] Лимит попыток на этой странице — останавливаю парсинг.")
+        print(
+          "[AVITO] Лимит попыток на этой странице — завершаю текущий прогон с уже собранными объявлениями."
+        )
         abort_page_loop = True
         break
+      if status_callback:
+        try:
+          status_callback(
+            {
+              "phase": "block_retry_wait",
+              "page": int(page),
+              "wait_sec": int(AVITO_BLOCK_RETRY_WAIT_SEC),
+              "next_round": int(block_round + 1),
+              "block_round_max": int(AVITO_BLOCK_MAX_RETRIES_PER_PAGE),
+            }
+          )
+        except Exception as e:
+          print(f"[AVITO] status_callback: {e}")
       _sleep_with_stop(stop_event, float(AVITO_BLOCK_RETRY_WAIT_SEC))
 
     if abort_page_loop:
