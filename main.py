@@ -1,4 +1,5 @@
 import argparse
+import logging
 import os
 import random
 import time
@@ -95,6 +96,11 @@ def _validate_args(args):
 
 
 def build_driver(headless=True):
+  # Selenium Wire / mitmproxy может печатать шумные TcpDisconnect/BrokenPipe
+  # при закрытии клиентских соединений браузером. Это не всегда фатально.
+  logging.getLogger("seleniumwire").setLevel(logging.ERROR)
+  logging.getLogger("seleniumwire.thirdparty.mitmproxy").setLevel(logging.ERROR)
+
   chrome_options = Options()
   # «eager»/«normal» ждут load/DOMContentLoaded — на медленном прокси driver.get висит до page_load_timeout.
   # «none»: навигация не блокирует на полной загрузке; готовность ждём в wait_for_document_ready().
@@ -140,7 +146,11 @@ def build_driver(headless=True):
       "proxy": {
         "http": f"http://{MOBILE_PROXY_USER}:{MOBILE_PROXY_PASS}@{MOBILE_PROXY_HOST}:{MOBILE_PROXY_PORT}",
         "https": f"http://{MOBILE_PROXY_USER}:{MOBILE_PROXY_PASS}@{MOBILE_PROXY_HOST}:{MOBILE_PROXY_PORT}",
-      }
+      },
+      # Не выводить шумные traceback при закрытых клиентских сокетах.
+      "suppress_connection_errors": True,
+      # Мы не читаем трафик Selenium Wire в коде — уменьшаем нагрузку на слабый VPS.
+      "disable_capture": True,
     }
 
   driver = webdriver.Chrome(service=service, options=chrome_options, seleniumwire_options=seleniumwire_options)
