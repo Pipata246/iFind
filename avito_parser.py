@@ -606,6 +606,8 @@ def _js_click_filter_option(driver, raw_text: str, mode: str) -> bool:
               if (dm.indexOf('filter') !== -1 || dm.indexOf('params') !== -1) add(n);
             });
           }
+          // Крайний fallback: ищем по всему body (новая вёрстка может быть без явного контейнера фильтров).
+          if (list.length === 0 && document.body) add(document.body);
           return list;
         }
         function inFilterColumn(el){
@@ -1222,6 +1224,10 @@ def _wait_for_avito_filters_panel(driver, timeout_sec=45, stop_event=None):
         }
         var rc = document.querySelector('[role="complementary"]');
         if (rc && rc.getBoundingClientRect().height > 80) return true;
+        // Текстовые маркеры левой колонки (бывают без стабильных data-marker/class).
+        var txt = ((document.body && document.body.innerText) || '').toLowerCase();
+        if (txt.indexOf('память') !== -1 && txt.indexOf('sim-карты') !== -1) return true;
+        if (txt.indexOf('оперативная память') !== -1 && txt.indexOf('показать ещё') !== -1) return true;
         return false;
         """
       )
@@ -2106,14 +2112,14 @@ def parse_avito(
         filters_panel_ok = _wait_for_avito_filters_panel(
           driver, timeout_sec=filters_timeout, stop_event=stop_event
         )
-      # Карточки уже есть, а панель фильтров не появилась: не уходим в бесконечные перезаходы.
-      # Продолжаем без UI-кликов и применим текстовый fallback после сбора.
+      # Карточки уже есть, а панель фильтров не детектится селекторами:
+      # пробуем UI-фильтры всё равно (поиск по body/text), без перезаходов.
       if shell_ok and need_filters_panel and not filters_panel_ok:
         dom_ready = True
-        ui_filters_temporarily_disabled = True
+        ui_filters_temporarily_disabled = False
         print(
           "[AVITO] Карточки есть, но панель фильтров не появилась. "
-          "Продолжаю без UI-фильтров, включу текстовый отбор после сбора."
+          "Пробую применить UI-фильтры через расширенный поиск по DOM."
         )
         if status_callback:
           try:
