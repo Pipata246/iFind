@@ -2177,6 +2177,49 @@ def parse_avito(
           print(f"[AVITO] DOM готов после перезагрузки (попытка {dom_try}/3).")
         break
       _log_avito_empty_page_probe(driver)
+      blocked_after_probe, blocked_reason_after_probe = _is_avito_blocked(driver)
+      if blocked_after_probe:
+        print(
+          f"[AVITO] После probe обнаружена блокировка ({blocked_reason_after_probe}). "
+          f"Жду {AVITO_BLOCK_RETRY_WAIT_SEC} сек и перезахожу на страницу…"
+        )
+        if status_callback:
+          try:
+            status_callback(
+              {
+                "phase": "block_detected",
+                "page": int(page),
+                "reason": str(blocked_reason_after_probe or ""),
+                "block_round": int(dom_try),
+                "block_round_max": int(AVITO_DOM_RELOAD_TRIES),
+              }
+            )
+          except Exception as e:
+            print(f"[AVITO] status_callback: {e}")
+          try:
+            status_callback(
+              {
+                "phase": "block_retry_wait",
+                "page": int(page),
+                "wait_sec": int(AVITO_BLOCK_RETRY_WAIT_SEC),
+                "next_round": int(min(dom_try + 1, AVITO_DOM_RELOAD_TRIES)),
+                "block_round_max": int(AVITO_DOM_RELOAD_TRIES),
+              }
+            )
+          except Exception as e:
+            print(f"[AVITO] status_callback: {e}")
+        _sleep_with_stop(stop_event, float(AVITO_BLOCK_RETRY_WAIT_SEC))
+        if stop_event is not None and stop_event.is_set():
+          abort_page_loop = True
+          break
+        try:
+          driver.get(url)
+          if not wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT, stop_event):
+            print("[AVITO] После перезахода после probe document.readyState не готов — пробую дальше.")
+          _sleep_with_stop(stop_event, 2.5)
+        except Exception as e:
+          print(f"[AVITO] Ошибка перезахода после probe-блокировки: {e}")
+        continue
       print(
         f"[AVITO] DOM не готов (попытка {dom_try}/{AVITO_DOM_RELOAD_TRIES}): "
         f"cards={'ok' if shell_ok else 'none'}, filters_panel={'ok' if filters_panel_ok else 'none'}."
