@@ -232,6 +232,13 @@ async def _emit_avito_parse_status(update: Update, payload: dict):
       f"Жду {wait_sec} сек для нового IP (страница {page}), затем раунд {next_round}/{round_max}.",
       reply_markup=build_stop_keyboard(),
     )
+  elif phase == "ui_filters_unavailable":
+    page = int(payload.get("page") or 1)
+    await update.message.reply_text(
+      f"На странице {page} карточки есть, но панель фильтров не появилась. "
+      "Продолжаю без UI-кликов фильтров и отфильтрую по тексту объявлений.",
+      reply_markup=build_stop_keyboard(),
+    )
   elif phase == "block_give_up":
     page = int(payload.get("page") or 1)
     reason = str(payload.get("reason") or "unknown")
@@ -389,6 +396,7 @@ async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFA
           "block_detected",
           "block_retry_wait",
           "block_give_up",
+          "ui_filters_unavailable",
         ):
           return
         _notify(payload)

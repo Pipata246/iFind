@@ -1928,6 +1928,7 @@ def parse_avito(
   detected_pages = 1
   fallback_without_ui_filters_done = False
   parse_scope_announced = False
+  ui_filters_temporarily_disabled = False
 
   # Небольшая пауза перед первым запросом, чтобы не бить сайт сразу
   if page == 1:
@@ -2084,6 +2085,7 @@ def parse_avito(
     need_filters_panel = bool(
       page == 1 and filters and not fallback_without_ui_filters_done and _has_meaningful_avito_ui_filters(filters)
     )
+    ui_filters_temporarily_disabled = False
     dom_ready = False
     for dom_try in range(1, 4):
       shell_ok = _wait_for_avito_listing_shell(driver, timeout_sec=50 if dom_try == 1 else 35, stop_event=stop_event)
@@ -2092,6 +2094,21 @@ def parse_avito(
         filters_panel_ok = _wait_for_avito_filters_panel(
           driver, timeout_sec=35 if dom_try == 1 else 22, stop_event=stop_event
         )
+      # Карточки уже есть, а панель фильтров не появилась: не уходим в бесконечные перезаходы.
+      # Продолжаем без UI-кликов и применим текстовый fallback после сбора.
+      if shell_ok and need_filters_panel and not filters_panel_ok:
+        dom_ready = True
+        ui_filters_temporarily_disabled = True
+        print(
+          "[AVITO] Карточки есть, но панель фильтров не появилась. "
+          "Продолжаю без UI-фильтров, включу текстовый отбор после сбора."
+        )
+        if status_callback:
+          try:
+            status_callback({"phase": "ui_filters_unavailable", "page": int(page)})
+          except Exception as e:
+            print(f"[AVITO] status_callback: {e}")
+        break
       if shell_ok and filters_panel_ok:
         dom_ready = True
         if dom_try > 1:
@@ -2124,13 +2141,19 @@ def parse_avito(
 
     wait = WebDriverWait(driver, EXPLICIT_WAIT)
     # КРИТИЧНО: после fallback «без UI» нельзя снова жать фильтры — иначе снова 0 карточек.
-    if page == 1 and filters and not fallback_without_ui_filters_done and _has_meaningful_avito_ui_filters(filters):
+    if (
+      page == 1
+      and filters
+      and not fallback_without_ui_filters_done
+      and not ui_filters_temporarily_disabled
+      and _has_meaningful_avito_ui_filters(filters)
+    ):
       if status_callback:
         try:
           status_callback({"phase": "applying_filters"})
         except Exception as e:
           print(f"[AVITO] status_callback: {e}")
-    if page == 1 and filters and not fallback_without_ui_filters_done:
+    if page == 1 and filters and not fallback_without_ui_filters_done and not ui_filters_temporarily_disabled:
       try:
         ui_applied = _apply_avito_ui_filters(driver, filters, stop_event=stop_event) or {}
         filtered_base_url = driver.current_url or ""
