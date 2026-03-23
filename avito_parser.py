@@ -235,6 +235,42 @@ def _sleep_with_stop(stop_event, seconds: float, step: float = 0.25):
     sleep(min(step, remaining))
 
 
+def _open_avito_with_warmup(driver, target_url: str, stop_event=None):
+  """Мягкий вход: главная -> (город) -> целевой URL.
+
+  На мобильных прокси прямой заход сразу на тяжёлую выдачу чаще ловит блокировку.
+  """
+  parsed = urlparse(target_url or "")
+  steps = [AVITO_BASE_URL]
+  city_step = ""
+  try:
+    path_parts = [p for p in (parsed.path or "").split("/") if p]
+    if path_parts:
+      city_step = f"{AVITO_BASE_URL}/{path_parts[0]}"
+  except Exception:
+    city_step = ""
+  if city_step and city_step != AVITO_BASE_URL:
+    steps.append(city_step)
+  if target_url:
+    steps.append(target_url)
+
+  seen = set()
+  ordered = []
+  for u in steps:
+    if not u or u in seen:
+      continue
+    seen.add(u)
+    ordered.append(u)
+
+  for idx, u in enumerate(ordered):
+    driver.get(u)
+    if not wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT, stop_event):
+      raise TimeoutException("document.readyState не достиг готовности")
+    # Короткие «человеческие» паузы между шагами входа.
+    if idx < len(ordered) - 1:
+      _sleep_with_stop(stop_event, random.uniform(2.5, 5.5))
+
+
 def _avito_listing_shell_present(driver) -> bool:
   """Проверка, что в DOM появилась выдача или колонка фильтров (несколько вариантов вёрстки)."""
   try:
@@ -1972,6 +2008,8 @@ def parse_avito(
         )
       else:
         print(f"[AVITO] Страница {page}/{max_pages}: загрузка…")
+      if page == 1:
+        print("[AVITO] Мягкий вход: главная -> город -> поиск.")
       if status_callback:
         try:
           status_callback(
@@ -1989,7 +2027,10 @@ def parse_avito(
       loaded = False
       for attempt in range(1, 4):
         try:
-          driver.get(url)
+          if page == 1:
+            _open_avito_with_warmup(driver, url, stop_event=stop_event)
+          else:
+            driver.get(url)
           print(
             f"[AVITO] Ожидание готовности страницы (до {DOCUMENT_READY_TIMEOUT} сек, "
             "без ожидания полной загрузки ресурсов)…"
