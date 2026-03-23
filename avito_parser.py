@@ -2104,6 +2104,50 @@ def parse_avito(
     ui_filters_temporarily_disabled = False
     dom_ready = False
     for dom_try in range(1, AVITO_DOM_RELOAD_TRIES + 1):
+      blocked_dom, blocked_reason_dom = _is_avito_blocked(driver)
+      if blocked_dom:
+        print(
+          f"[AVITO] Во время ожидания DOM обнаружена блокировка ({blocked_reason_dom}). "
+          f"Жду {AVITO_BLOCK_RETRY_WAIT_SEC} сек и перезахожу на страницу…"
+        )
+        if status_callback:
+          try:
+            status_callback(
+              {
+                "phase": "block_detected",
+                "page": int(page),
+                "reason": str(blocked_reason_dom or ""),
+                "block_round": int(dom_try),
+                "block_round_max": int(AVITO_DOM_RELOAD_TRIES),
+              }
+            )
+          except Exception as e:
+            print(f"[AVITO] status_callback: {e}")
+          try:
+            status_callback(
+              {
+                "phase": "block_retry_wait",
+                "page": int(page),
+                "wait_sec": int(AVITO_BLOCK_RETRY_WAIT_SEC),
+                "next_round": int(min(dom_try + 1, AVITO_DOM_RELOAD_TRIES)),
+                "block_round_max": int(AVITO_DOM_RELOAD_TRIES),
+              }
+            )
+          except Exception as e:
+            print(f"[AVITO] status_callback: {e}")
+        _sleep_with_stop(stop_event, float(AVITO_BLOCK_RETRY_WAIT_SEC))
+        if stop_event is not None and stop_event.is_set():
+          abort_page_loop = True
+          break
+        try:
+          driver.get(url)
+          if not wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT, stop_event):
+            print("[AVITO] После перезахода при блокировке document.readyState не готов — пробую дальше.")
+          _sleep_with_stop(stop_event, 2.5)
+        except Exception as e:
+          print(f"[AVITO] Ошибка перезахода после блокировки: {e}")
+        continue
+
       shell_timeout = AVITO_DOM_WAIT_SHELL_FIRST if dom_try == 1 else AVITO_DOM_WAIT_SHELL_NEXT
       shell_ok = _wait_for_avito_listing_shell(driver, timeout_sec=shell_timeout, stop_event=stop_event)
       filters_panel_ok = True
