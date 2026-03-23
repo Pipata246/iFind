@@ -15,6 +15,11 @@ from config import (
   AVITO_BASE_URL,
   AVITO_BLOCK_MAX_RETRIES_PER_PAGE,
   AVITO_BLOCK_RETRY_WAIT_SEC,
+  AVITO_DOM_RELOAD_TRIES,
+  AVITO_DOM_WAIT_FILTERS_FIRST,
+  AVITO_DOM_WAIT_FILTERS_NEXT,
+  AVITO_DOM_WAIT_SHELL_FIRST,
+  AVITO_DOM_WAIT_SHELL_NEXT,
   AVITO_MAX_PAGES_PER_RUN,
   DOCUMENT_READY_TIMEOUT,
   EXPLICIT_WAIT,
@@ -258,6 +263,11 @@ def _avito_listing_shell_present(driver) -> bool:
         if (document.querySelector('a[data-marker="item-title"]')) return true;
         if (document.querySelector('[class*="iva-item-root"]')) return true;
         if (document.querySelector('[class*="iva-item-content"]')) return true;
+        // Иногда data-marker почти нет, но выдача уже отрисована текстом.
+        var txt = ((document.body && document.body.innerText) || '').toLowerCase();
+        if (txt.indexOf('сортировка') !== -1 && txt.indexOf('уведомлять о новых') !== -1) return true;
+        if (txt.indexOf('выбраны фильтры') !== -1 && txt.indexOf('iphone') !== -1) return true;
+        if (txt.indexOf('мобильные телефоны') !== -1 && txt.indexOf('главная') !== -1) return true;
         var links = document.querySelectorAll('a[href*="/item/"]');
         return links.length >= 2;
         """
@@ -2087,12 +2097,14 @@ def parse_avito(
     )
     ui_filters_temporarily_disabled = False
     dom_ready = False
-    for dom_try in range(1, 4):
-      shell_ok = _wait_for_avito_listing_shell(driver, timeout_sec=50 if dom_try == 1 else 35, stop_event=stop_event)
+    for dom_try in range(1, AVITO_DOM_RELOAD_TRIES + 1):
+      shell_timeout = AVITO_DOM_WAIT_SHELL_FIRST if dom_try == 1 else AVITO_DOM_WAIT_SHELL_NEXT
+      shell_ok = _wait_for_avito_listing_shell(driver, timeout_sec=shell_timeout, stop_event=stop_event)
       filters_panel_ok = True
       if need_filters_panel:
+        filters_timeout = AVITO_DOM_WAIT_FILTERS_FIRST if dom_try == 1 else AVITO_DOM_WAIT_FILTERS_NEXT
         filters_panel_ok = _wait_for_avito_filters_panel(
-          driver, timeout_sec=35 if dom_try == 1 else 22, stop_event=stop_event
+          driver, timeout_sec=filters_timeout, stop_event=stop_event
         )
       # Карточки уже есть, а панель фильтров не появилась: не уходим в бесконечные перезаходы.
       # Продолжаем без UI-кликов и применим текстовый fallback после сбора.
@@ -2116,10 +2128,10 @@ def parse_avito(
         break
       _log_avito_empty_page_probe(driver)
       print(
-        f"[AVITO] DOM не готов (попытка {dom_try}/3): "
+        f"[AVITO] DOM не готов (попытка {dom_try}/{AVITO_DOM_RELOAD_TRIES}): "
         f"cards={'ok' if shell_ok else 'none'}, filters_panel={'ok' if filters_panel_ok else 'none'}."
       )
-      if dom_try >= 3:
+      if dom_try >= AVITO_DOM_RELOAD_TRIES:
         break
       print("[AVITO] Перезагружаю страницу и жду DOM снова…")
       try:
@@ -2133,7 +2145,7 @@ def parse_avito(
 
     if not dom_ready:
       print(
-        "[AVITO] Не удалось получить карточки/панель фильтров после 3 перезаходов. "
+        f"[AVITO] Не удалось получить карточки/панель фильтров после {AVITO_DOM_RELOAD_TRIES} перезаходов. "
         "Останавливаю текущий прогон, чтобы не парсить неверную выдачу."
       )
       abort_page_loop = True

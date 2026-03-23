@@ -66,3 +66,12 @@ AVITO_MAX_PAGES_PER_RUN = max(1, _env_int("AVITO_MAX_PAGES_PER_RUN", 5))
 AVITO_BLOCK_MAX_RETRIES_PER_PAGE = max(1, _env_int("AVITO_BLOCK_MAX_RETRIES_PER_PAGE", 5))
 AVITO_BLOCK_RETRY_WAIT_SEC = max(10, _env_int("AVITO_BLOCK_RETRY_WAIT_SEC", 130))
 
+# Сколько раз перезаходить на страницу, если DOM не догрузился (карточки/панель фильтров не видны).
+AVITO_DOM_RELOAD_TRIES = max(1, _env_int("AVITO_DOM_RELOAD_TRIES", 5))
+# Таймауты ожидания появления карточек в DOM (сек): первая попытка и повторные.
+AVITO_DOM_WAIT_SHELL_FIRST = max(20, _env_int("AVITO_DOM_WAIT_SHELL_FIRST", 95))
+AVITO_DOM_WAIT_SHELL_NEXT = max(15, _env_int("AVITO_DOM_WAIT_SHELL_NEXT", 70))
+# Таймауты ожидания панели фильтров на 1-й странице (сек): первая попытка и повторные.
+AVITO_DOM_WAIT_FILTERS_FIRST = max(20, _env_int("AVITO_DOM_WAIT_FILTERS_FIRST", 80))
+AVITO_DOM_WAIT_FILTERS_NEXT = max(15, _env_int("AVITO_DOM_WAIT_FILTERS_NEXT", 60))
+
