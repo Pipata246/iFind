@@ -1408,6 +1408,23 @@ def _build_page_url(base_url, page):
   return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
 
 
+def _ensure_price_bounds_in_url(url: str, price_min, price_max) -> str:
+  """Гарантирует, что pmin/pmax не потеряются после UI-кликов/редиректов Avito."""
+  if not url:
+    return url
+  try:
+    p = urlparse(url)
+    q = dict(parse_qsl(p.query, keep_blank_values=True))
+    if price_min is not None:
+      q["pmin"] = str(price_min)
+    if price_max is not None:
+      q["pmax"] = str(price_max)
+    new_query = urlencode(q, doseq=True)
+    return urlunparse((p.scheme, p.netloc, p.path, p.params, new_query, p.fragment))
+  except Exception:
+    return url
+
+
 def _has_meaningful_avito_ui_filters(filters):
   """Есть ли смысловые фильтры в интерфейсе (не только значения по умолчанию)."""
   if not filters:
@@ -2328,9 +2345,22 @@ def parse_avito(
     if page == 1 and filters and not fallback_without_ui_filters_done and not ui_filters_temporarily_disabled:
       try:
         ui_applied = _apply_avito_ui_filters(driver, filters, stop_event=stop_event) or {}
-        filtered_base_url = driver.current_url or ""
+        current_after_filters = driver.current_url or ""
+        current_after_filters = _ensure_price_bounds_in_url(current_after_filters, price_min, price_max)
+        raw_ui_sum = sum(int(ui_applied.get(k, 0)) for k in ("memory", "ram", "sim", "colors", "condition", "rating_4_plus"))
+        meaningful = _has_meaningful_avito_ui_filters(filters or {})
+        has_filter_signature = ("f=" in current_after_filters) or ("localPriority=" in current_after_filters)
+        if meaningful and raw_ui_sum > 0 and not has_filter_signature:
+          print(
+            "[AVITO] UI-клики не подтвердились URL-подписью фильтров (нет f=/localPriority). "
+            "Сбрасываю ui_applied и продолжаю с базовым URL + пост-фильтром."
+          )
+          ui_applied = {}
+          filtered_base_url = _ensure_price_bounds_in_url(url, price_min, price_max)
+        else:
+          filtered_base_url = current_after_filters or _ensure_price_bounds_in_url(url, price_min, price_max)
         if filtered_base_url:
-          print(f"[AVITO] URL после фильтров (для пагинации, параметр f= сохраняется): {filtered_base_url[:300]}")
+          print(f"[AVITO] URL после фильтров: {filtered_base_url[:320]}")
       except Exception as e:
         print(f"[AVITO] Не удалось применить часть фильтров: {e}")
         ui_applied = {}
