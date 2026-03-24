@@ -1496,6 +1496,25 @@ def _url_filters_fully_committed(url: str, filters) -> bool:
     return False
 
 
+def _requested_ui_filters_satisfied(filters, ui_applied) -> bool:
+  """По счётчикам кликов в UI: на каждый запрошенный пункт фильтра был успешный выбор."""
+  if not filters:
+    return True
+  ua = ui_applied or {}
+  for key in ("memory", "ram", "sim", "colors", "condition"):
+    req = [x for x in (filters.get(key) or []) if str(x).strip()]
+    if not req:
+      continue
+    if int(ua.get(key) or 0) < len(req):
+      return False
+  if filters.get("rating_4_plus") and int(ua.get("rating_4_plus") or 0) < 1:
+    return False
+  st = str(filters.get("seller_type") or "all").lower()
+  if st != "all" and int(ua.get("seller_type") or 0) < 1:
+    return False
+  return True
+
+
 def _wait_and_click_show_results_button(driver, stop_event=None, max_sec=40.0):
   """Ждём появления кнопки под фильтрами: прокрутка + повторные клики."""
   deadline = time.monotonic() + float(max_sec)
@@ -2246,17 +2265,18 @@ def _apply_avito_ui_filters(driver, filters, stop_event=None):
       "[AVITO] Кнопка «Показать … объявлений» не найдена за отведённое время. "
       "Фильтры могут не попасть в URL — будет повтор попытки на уровне парсера."
     )
-  for _ in range(28):
+  # Avito SPA часто обновляет f=/localPriority с задержкой после «Показать объявления».
+  for _ in range(48):
     cur = driver.current_url or ""
-    if cur and cur != pre_apply_url and _url_filters_fully_committed(cur, filters):
+    if cur and _url_filters_fully_committed(cur, filters):
       break
-    sleep(0.35)
+    sleep(0.42)
   if _has_meaningful_avito_ui_filters(filters) and not _url_filters_fully_committed(
     driver.current_url or "", filters
   ):
     print(
-      "[AVITO] В адресе нет localPriority и короткий f= — похоже, выдача не приняла фильтры "
-      "(нужна кнопка «Показать объявления» под фильтрами)."
+      "[AVITO] В адресе нет localPriority/длинного f= после клика (у части вёрсток Avito так бывает); "
+      "ниже парсер примет выдачу по факту UI, если цена/цвет и клики совпали с запросом."
     )
   sleep(0.8)
   applied["_show_clicked"] = 1 if clicked_show else 0
@@ -3182,16 +3202,37 @@ def parse_avito(
             current_after_filters, (filters or {}).get("colors")
           )
           has_f_commit = _url_filters_fully_committed(current_after_filters, filters)
+          strict_url_ok = (
+            has_filter_signature
+            and has_price_signature
+            and has_color_ok
+            and has_f_commit
+          )
+          # Частый случай (новый фронт Avito): фильтры реально применены в колонке и по выдаче,
+          # но в адресе нет длинного f= / localPriority — только pmin/pmax/cd и т.д.
+          ui_evidence_ok = (
+            meaningful
+            and has_price_signature
+            and has_color_ok
+            and int((ui_applied or {}).get("_show_clicked") or 0) == 1
+            and _requested_ui_filters_satisfied(filters or {}, ui_applied or {})
+          )
           print(
             f"[AVITO] Проверка URL после фильтров (попытка {apply_try}): "
             f"has_f={has_filter_signature}, has_price={has_price_signature}, "
             f"has_color_ok={has_color_ok} (path_slug={has_color_in_path}), "
-            f"f_commit={has_f_commit}, ui_sum={raw_ui_sum}, url={current_after_filters[:320]}"
+            f"f_commit={has_f_commit}, ui_sum={raw_ui_sum}, strict_url={strict_url_ok}, "
+            f"ui_evidence={ui_evidence_ok}, url={current_after_filters[:320]}"
           )
           if not meaningful:
             apply_ok = True
             break
-          if has_filter_signature and has_price_signature and has_color_ok and has_f_commit:
+          if strict_url_ok or ui_evidence_ok:
+            if ui_evidence_ok and not strict_url_ok:
+              print(
+                "[AVITO] В URL нет полного f=/localPriority, но фильтры подтверждены UI "
+                "(«Показать объявления» + клики по всем запрошенным блокам) — продолжаем парсинг."
+              )
             if status_callback:
               try:
                 status_callback(
@@ -3208,9 +3249,9 @@ def parse_avito(
 
         if meaningful and not apply_ok:
           raise RuntimeError(
-            "Avito не подтвердил фильтры в URL: нужны localPriority или полный f= после кнопки "
-            "«Показать объявления», либо не нажата кнопка под фильтрами. "
-            "Парсинг остановлен, чтобы не собирать неверную выдачу."
+            "Avito не подтвердил фильтры: в URL нет полного f=/localPriority, "
+            "и не сработал запасной критерий (кнопка «Показать объявления», цена в URL, цвет, "
+            "успешные клики по всем запрошенным фильтрам). Парсинг остановлен."
           )
 
         filtered_base_url = last_url or _ensure_price_bounds_in_url(url, price_min, price_max)
