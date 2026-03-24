@@ -57,6 +57,8 @@ WB_BASE_URL = os.getenv("WB_BASE_URL", "https://www.wildberries.ru").rstrip("/")
 
 # Light mode for low-resource VPS (1 vCPU / 1GB RAM): less pages and shorter pauses.
 VPS_LIGHT_MODE = _env_bool("VPS_LIGHT_MODE", False)
+# Для отладки: показать окно браузера в Telegram-ране (headless=False).
+TELEGRAM_SHOW_BROWSER = _env_bool("TELEGRAM_SHOW_BROWSER", False)
 
 # Максимум страниц выдачи Avito за один запуск (выдача может быть на десятках страниц).
 AVITO_MAX_PAGES_PER_RUN = max(1, _env_int("AVITO_MAX_PAGES_PER_RUN", 5))

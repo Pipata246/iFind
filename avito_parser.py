@@ -1477,6 +1477,12 @@ def _ensure_price_bounds_in_url(url: str, price_min, price_max) -> str:
     return url
 
 
+def _has_filter_signature(url: str) -> bool:
+  """UI-фильтры Avito считаем применёнными только при наличии query-подписи f=."""
+  u = (url or "").lower()
+  return ("?f=" in u) or ("&f=" in u)
+
+
 def _has_meaningful_avito_ui_filters(filters):
   """Есть ли смысловые фильтры в интерфейсе (не только значения по умолчанию)."""
   if not filters:
@@ -2399,26 +2405,49 @@ def parse_avito(
           print(f"[AVITO] status_callback: {e}")
     if page == 1 and filters and not fallback_without_ui_filters_done and not ui_filters_temporarily_disabled:
       try:
-        ui_applied = _apply_avito_ui_filters(driver, filters, stop_event=stop_event) or {}
-        current_after_filters = driver.current_url or ""
-        current_after_filters = _ensure_price_bounds_in_url(current_after_filters, price_min, price_max)
-        raw_ui_sum = sum(int(ui_applied.get(k, 0)) for k in ("memory", "ram", "sim", "colors", "condition", "rating_4_plus"))
         meaningful = _has_meaningful_avito_ui_filters(filters or {})
-        has_filter_signature = ("f=" in current_after_filters) or ("localPriority=" in current_after_filters)
-        if meaningful and raw_ui_sum > 0 and not has_filter_signature:
-          print(
-            "[AVITO] UI-клики не подтвердились URL-подписью фильтров (нет f=/localPriority). "
-            "Сбрасываю ui_applied и продолжаю с базовым URL + пост-фильтром."
+        max_apply_attempts = 3 if meaningful else 1
+        apply_ok = False
+        last_url = ""
+        for apply_try in range(1, max_apply_attempts + 1):
+          if apply_try > 1:
+            print(f"[AVITO] Повторное применение UI-фильтров: попытка {apply_try}/{max_apply_attempts}…")
+            _open_avito_with_soft_entry(driver, url, stop_event=stop_event)
+            if not wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT, stop_event):
+              raise TimeoutException("document.readyState не достиг готовности при повторном применении фильтров")
+            _sleep_with_stop(stop_event, random.uniform(1.2, 2.2))
+
+          ui_applied = _apply_avito_ui_filters(driver, filters, stop_event=stop_event) or {}
+          current_after_filters = driver.current_url or ""
+          current_after_filters = _ensure_price_bounds_in_url(current_after_filters, price_min, price_max)
+          last_url = current_after_filters
+          raw_ui_sum = sum(
+            int(ui_applied.get(k, 0)) for k in ("memory", "ram", "sim", "colors", "condition", "rating_4_plus")
           )
-          ui_applied = {}
-          filtered_base_url = _ensure_price_bounds_in_url(url, price_min, price_max)
-        else:
-          filtered_base_url = current_after_filters or _ensure_price_bounds_in_url(url, price_min, price_max)
+          has_filter_signature = _has_filter_signature(current_after_filters)
+          print(
+            f"[AVITO] Проверка URL после фильтров (попытка {apply_try}): "
+            f"has_f={has_filter_signature}, ui_sum={raw_ui_sum}, url={current_after_filters[:320]}"
+          )
+          if not meaningful:
+            apply_ok = True
+            break
+          if has_filter_signature:
+            apply_ok = True
+            break
+
+        if meaningful and not apply_ok:
+          raise RuntimeError(
+            "Avito не подтвердил применение фильтров в URL (нет f=) после 3 попыток. "
+            "Останавливаю парсинг, чтобы не собирать неверную выдачу."
+          )
+
+        filtered_base_url = last_url or _ensure_price_bounds_in_url(url, price_min, price_max)
         if filtered_base_url:
           print(f"[AVITO] URL после фильтров: {filtered_base_url[:320]}")
       except Exception as e:
-        print(f"[AVITO] Не удалось применить часть фильтров: {e}")
-        ui_applied = {}
+        print(f"[AVITO] Не удалось корректно применить фильтры: {e}")
+        raise
     elif page == 1 and filters and fallback_without_ui_filters_done:
       print("[AVITO] Повтор после пустой выдачи: UI-фильтры отключены, парсинг по базовому запросу + текстовый отбор в конце.")
     if scroll_passes > 0:
