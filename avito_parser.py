@@ -394,6 +394,7 @@ def _open_avito_with_soft_entry(driver, target_url: str, stop_event=None, includ
     # Каждый шаг входа пробуем ограниченно, чтобы не зависать на одном URL.
     for step_try in range(1, 3):
       try:
+        _sleep_with_stop(stop_event, random.uniform(0.25, 0.95))
         driver.get(u)
         if not wait_for_document_ready(driver, step_ready_timeout, stop_event):
           raise TimeoutException("document.readyState не достиг готовности")
@@ -420,7 +421,7 @@ def _open_avito_with_soft_entry(driver, target_url: str, stop_event=None, includ
     except Exception:
       pass
     if idx < len(ordered_steps) - 1:
-      _sleep_with_stop(stop_event, random.uniform(1.8, 4.2))
+      _sleep_with_stop(stop_event, random.uniform(2.4, 5.8))
 
 
 def _avito_listing_shell_present(driver) -> bool:
@@ -2467,9 +2468,9 @@ def parse_avito(
   parse_scope_announced = False
   ui_filters_temporarily_disabled = False
 
-  # Небольшая пауза перед первым запросом, чтобы не бить сайт сразу
+  # Пауза перед первым запросом (чуть дольше — меньше вероятность «резкого» триггера антибота)
   if page == 1:
-    first_delay = random.uniform(3.0, 6.0)
+    first_delay = random.uniform(4.5, 9.5)
     print(f"[AVITO] Старт через {first_delay:.0f} сек…")
     _sleep_with_stop(stop_event, first_delay)
 
@@ -2514,9 +2515,36 @@ def parse_avito(
       for attempt in range(1, 4):
         try:
           if page == 1:
-            _open_avito_with_soft_entry(
-              driver, url, stop_event=stop_event, include_home=False, reset_session=True
-            )
+            # Чередуем сценарии: цепочка город→категория→выдача, прямой GET, вход без сброса cookies.
+            # После паузы смены IP чаще помогает один прямой GET (меньше переходов подряд).
+            br = int(block_round)
+            if attempt == 1 and br > 1:
+              print(
+                "[AVITO] После ожидания смены IP: прямой переход на выдачу (без цепочки шагов)…"
+              )
+              _sleep_with_stop(stop_event, random.uniform(2.0, 6.0))
+              driver.get(url)
+            elif attempt == 1:
+              _open_avito_with_soft_entry(
+                driver, url, stop_event=stop_event, include_home=False, reset_session=True
+              )
+            elif attempt == 2:
+              if br > 1:
+                print("[AVITO] Повтор входа: мягкая цепочка без сброса cookies…")
+                _sleep_with_stop(stop_event, random.uniform(3.5, 8.0))
+                _open_avito_with_soft_entry(
+                  driver, url, stop_event=stop_event, include_home=False, reset_session=False
+                )
+              else:
+                print("[AVITO] Альтернативный вход: прямой GET по URL выдачи…")
+                _sleep_with_stop(stop_event, random.uniform(5.5, 12.0))
+                driver.get(url)
+            else:
+              print("[AVITO] Последняя попытка загрузки стр.1: мягкий вход без сброса сессии…")
+              _sleep_with_stop(stop_event, random.uniform(4.5, 10.0))
+              _open_avito_with_soft_entry(
+                driver, url, stop_event=stop_event, include_home=False, reset_session=False
+              )
           else:
             driver.get(url)
           print(

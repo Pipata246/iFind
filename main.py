@@ -155,6 +155,14 @@ def build_driver(headless=True):
 
   driver = webdriver.Chrome(service=service, options=chrome_options, seleniumwire_options=seleniumwire_options)
   try:
+    driver.execute_cdp_cmd("Network.enable", {})
+    driver.execute_cdp_cmd(
+      "Network.setExtraHTTPHeaders",
+      {"headers": {"Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"}},
+    )
+  except Exception:
+    pass
+  try:
     driver.execute_cdp_cmd(
       "Page.addScriptToEvaluateOnNewDocument",
       {
