@@ -193,17 +193,17 @@ async def _emit_avito_parse_status(update: Update, payload: dict):
   if phase == "ready":
     # Этап: вход в выдачу завершён.
     await update.message.reply_text(
-      "✅ Этап 1/5: вход на Avito выполнен.\n" + _format_avito_ready_bot_message(payload),
+      "✅ Этап «Вход»: Avito открыт.\n" + _format_avito_ready_bot_message(payload),
       reply_markup=build_stop_keyboard(),
     )
   elif phase == "driver_ready":
     await update.message.reply_text(
-      "🚀 Этап 1/5: запускаю браузер и пытаюсь зайти на главную Avito…",
+      "🚀 Этап «Вход»: запускаю браузер и пытаюсь зайти на Avito…",
       reply_markup=build_stop_keyboard(),
     )
   elif phase == "applying_filters":
     await update.message.reply_text(
-      "🎛️ Этап 2/5: применяю фильтры в интерфейсе Avito…",
+      "🎛️ Этап «Фильтры»: применяю фильтры в интерфейсе Avito…",
       reply_markup=build_stop_keyboard(),
     )
   elif phase == "page_loading":
@@ -212,7 +212,7 @@ async def _emit_avito_parse_status(update: Update, payload: dict):
     round_no = int(payload.get("block_round") or 1)
     round_max = int(payload.get("block_round_max") or 3)
     await update.message.reply_text(
-      f"📄 Этап 3/5: открываю страницу {page}/{pages} (попытка {round_no}/{round_max})…",
+      f"📄 Этап «Загрузка выдачи»: открываю страницу {page}/{pages} (попытка {round_no}/{round_max})…",
       reply_markup=build_stop_keyboard(),
     )
   elif phase == "block_detected":
@@ -236,7 +236,7 @@ async def _emit_avito_parse_status(update: Update, payload: dict):
   elif phase == "ui_filters_unavailable":
     page = int(payload.get("page") or 1)
     await update.message.reply_text(
-      f"⚠️ Этап 2/5: на странице {page} не вижу панель фильтров. "
+      f"⚠️ Этап «Фильтры»: на странице {page} не вижу панель фильтров. "
       "Пробую запасной сценарий.",
       reply_markup=build_stop_keyboard(),
     )
@@ -254,9 +254,9 @@ async def _emit_avito_parse_status(update: Update, payload: dict):
     need_filters = bool(payload.get("need_filters_panel"))
     tries = int(payload.get("dom_try_max") or 5)
     msg = (
-      f"🔎 Этап 1/5: проверяю, что открылась выдача и фильтры (до {tries} попыток)…"
+      f"🔎 Этап «Проверка DOM»: проверяю, что открылась выдача и фильтры (до {tries} попыток)…"
       if need_filters
-      else f"🔎 Этап 1/5: проверяю, что открылась выдача (до {tries} попыток)…"
+      else f"🔎 Этап «Проверка DOM»: проверяю, что открылась выдача (до {tries} попыток)…"
     )
     await update.message.reply_text(msg, reply_markup=build_stop_keyboard())
   elif phase == "dom_retry":
@@ -291,13 +291,13 @@ async def _emit_avito_parse_status(update: Update, payload: dict):
     total = int(payload.get("total_collected") or 0)
     cards_seen = int(payload.get("cards_seen") or 0)
     await update.message.reply_text(
-      f"✅ Этап 4/5: страница {page} обработана — карточек {cards_seen}, добавлено {added}, всего {total}.",
+      f"✅ Этап «Обработка страницы»: {page} — карточек {cards_seen}, добавлено {added}, всего {total}.",
       reply_markup=build_stop_keyboard(),
     )
   elif phase == "parse_finished":
     total = int(payload.get("total_items") or 0)
     await update.message.reply_text(
-      f"📦 Этап 5/5: парсинг завершён. Всего объявлений: {total}. Готовлю Excel…",
+      f"📦 Этап «Завершение»: парсинг завершён. Всего объявлений: {total}. Готовлю Excel…",
       reply_markup=build_stop_keyboard(),
     )
   elif phase == "transport_issue":

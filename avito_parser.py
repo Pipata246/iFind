@@ -1600,6 +1600,53 @@ def _url_has_expected_price_bounds(url: str, price_min, price_max) -> bool:
     return False
 
 
+def _color_path_tokens(value: str):
+  """Ожидаемые slug-токены цвета в path URL Avito."""
+  raw = (value or "").strip().lower().replace("ё", "е")
+  if not raw:
+    return []
+  tokens = [raw]
+  mapping = {
+    "зелен": ["zelenyy", "zeleniy", "green"],
+    "черн": ["chernyy", "cherniy", "black"],
+    "бел": ["belyy", "beliy", "white"],
+    "син": ["siniy", "sinij", "blue"],
+    "голуб": ["goluboy", "blue"],
+    "желт": ["zheltyy", "yellow"],
+    "розов": ["rozovyy", "pink"],
+    "красн": ["krasnyy", "red"],
+    "фиолет": ["fioletovyy", "purple"],
+  }
+  for k, vals in mapping.items():
+    if k in raw:
+      tokens.extend(vals)
+  out = []
+  seen = set()
+  for t in tokens:
+    tt = (t or "").strip().lower()
+    if not tt or tt in seen:
+      continue
+    seen.add(tt)
+    out.append(tt)
+  return out
+
+
+def _url_has_expected_color_path(url: str, colors) -> bool:
+  """Если цвет запрошен, проверяем что path URL содержит цветовой slug."""
+  if not colors:
+    return True
+  try:
+    path = (urlparse(url or "").path or "").lower()
+  except Exception:
+    return False
+  # Допускаем совпадение любого из запрошенных цветов.
+  for c in colors or []:
+    for token in _color_path_tokens(str(c)):
+      if token and token in path:
+        return True
+  return False
+
+
 def _has_meaningful_avito_ui_filters(filters):
   """Есть ли смысловые фильтры в интерфейсе (не только значения по умолчанию)."""
   if not filters:
@@ -2696,15 +2743,16 @@ def parse_avito(
           )
           has_filter_signature = _has_filter_signature(current_after_filters)
           has_price_signature = _url_has_expected_price_bounds(current_after_filters, price_min, price_max)
+          has_color_path_signature = _url_has_expected_color_path(current_after_filters, (filters or {}).get("colors"))
           print(
             f"[AVITO] Проверка URL после фильтров (попытка {apply_try}): "
             f"has_f={has_filter_signature}, has_price={has_price_signature}, "
-            f"ui_sum={raw_ui_sum}, url={current_after_filters[:320]}"
+            f"has_color_path={has_color_path_signature}, ui_sum={raw_ui_sum}, url={current_after_filters[:320]}"
           )
           if not meaningful:
             apply_ok = True
             break
-          if has_filter_signature and has_price_signature:
+          if has_filter_signature and has_price_signature and has_color_path_signature:
             if status_callback:
               try:
                 status_callback(
