@@ -187,8 +187,12 @@ def _format_avito_ready_bot_message(payload: dict) -> str:
   )
 
 
-async def _emit_avito_parse_status(update: Update, payload: dict):
+async def _emit_avito_parse_status(
+  update: Update, payload: dict, stop_event: threading.Event | None = None
+):
   """Промежуточные статусы парсинга (синхронно с логами [AVITO])."""
+  if stop_event is not None and stop_event.is_set():
+    return
   phase = payload.get("phase")
   if phase == "ready":
     # Этап: вход в выдачу завершён.
@@ -434,7 +438,8 @@ async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFA
   stop_event = threading.Event()
   context.user_data["active_parse"] = {"platform": "avito", "stop_event": stop_event, "driver": None}
 
-  await update.message.reply_text("Запуск…", reply_markup=build_stop_keyboard())
+  start_msg = await update.message.reply_text("Запуск…", reply_markup=build_stop_keyboard())
+  context.user_data["avito_parse_start_msg_id"] = start_msg.message_id
 
   loop = asyncio.get_running_loop()
 
@@ -453,7 +458,11 @@ async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFA
       }
 
       def _notify(payload: dict):
-        fut = asyncio.run_coroutine_threadsafe(_emit_avito_parse_status(update, payload), loop)
+        if stop_event.is_set():
+          return
+        fut = asyncio.run_coroutine_threadsafe(
+          _emit_avito_parse_status(update, payload, stop_event), loop
+        )
         try:
           fut.result(timeout=120)
         except Exception as e:
@@ -577,6 +586,7 @@ async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFA
       filepath = await asyncio.to_thread(_sync_once)
   except Exception as e:
     context.user_data.pop("active_parse", None)
+    context.user_data.pop("avito_parse_start_msg_id", None)
     if context.user_data.get("stop_notified"):
       context.user_data.pop("stop_notified", None)
       return
@@ -596,6 +606,7 @@ async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFA
     )
     return
   context.user_data.pop("active_parse", None)
+  context.user_data.pop("avito_parse_start_msg_id", None)
 
   # Сообщение об остановке уже отправлено кнопкой. Не дублируем.
   if stop_event.is_set() and context.user_data.get("stop_notified"):
@@ -789,10 +800,20 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
       pass
 
     context.user_data["stop_notified"] = True
-    await update.message.reply_text(
-      "Парсинг остановлен (запрос принят).",
-      reply_markup=build_main_keyboard(),
-    )
+    mid = context.user_data.pop("avito_parse_start_msg_id", None)
+    cid = update.effective_chat.id
+    if mid is not None:
+      try:
+        await context.bot.edit_message_text(
+          chat_id=cid,
+          message_id=mid,
+          text="\u200b",
+          reply_markup=build_main_keyboard(),
+        )
+      except Exception:
+        await update.message.reply_text("\u200b", reply_markup=build_main_keyboard())
+    else:
+      await update.message.reply_text("\u200b", reply_markup=build_main_keyboard())
     return
 
   # Выбор «только сегодня / все» → колонка today_only в bot_manual_settings, затем парсинг по этой таблице

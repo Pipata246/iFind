@@ -3068,7 +3068,7 @@ def parse_avito(
     item.update(final_meta)
 
   print(f"[AVITO] Всего объявлений (с повторами): {len(all_items)}")
-  if status_callback:
+  if status_callback and (stop_event is None or not stop_event.is_set()):
     try:
       status_callback({"phase": "parse_finished", "total_items": int(len(all_items))})
     except Exception as e:
