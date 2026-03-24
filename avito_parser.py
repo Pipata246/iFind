@@ -201,6 +201,59 @@ def _city_to_slug(city):
   return slug.strip("-")
 
 
+def _latin_slug(text: str) -> str:
+  """Простой slug в латинице для model/color сегментов URL."""
+  if not text:
+    return ""
+  src = str(text).strip().lower().replace("ё", "е")
+  translit = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ж": "zh",
+    "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m", "н": "n",
+    "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u", "ф": "f",
+    "х": "h", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "sch", "ъ": "", "ы": "y",
+    "ь": "", "э": "e", "ю": "yu", "я": "ya",
+  }
+  out = []
+  for ch in src:
+    if ch in translit:
+      out.append(translit[ch])
+    elif ch.isalnum():
+      out.append(ch)
+    elif ch in (" ", "-", "_", "+"):
+      out.append("_")
+    else:
+      out.append("_")
+  slug = "".join(out)
+  while "__" in slug:
+    slug = slug.replace("__", "_")
+  return slug.strip("_")
+
+
+def _color_to_path_slug(color: str) -> str:
+  raw = (color or "").strip().lower().replace("ё", "е")
+  if not raw:
+    return ""
+  if "зелен" in raw:
+    return "zelenyy"
+  if "черн" in raw:
+    return "chernyy"
+  if "бел" in raw:
+    return "belyy"
+  if "син" in raw:
+    return "siniy"
+  if "голуб" in raw:
+    return "goluboy"
+  if "желт" in raw:
+    return "zheltyy"
+  if "розов" in raw:
+    return "rozovyy"
+  if "красн" in raw:
+    return "krasnyy"
+  if "фиолет" in raw:
+    return "fioletovyy"
+  return _latin_slug(raw)
+
+
 def _precision_params(precision):
   """Поэтапно: 10 = очень медленно (обход лимитов), 1 = быстрее. Все задержки увеличены."""
   max_pages_map = [1, 2, 3, 5, 7, 10, 20, 50, 100, 999]
@@ -460,7 +513,41 @@ def _wait_for_avito_listing_shell(driver, timeout_sec=45, stop_event=None):
   return False
 
 
-def build_avito_search_url(keyword, model, city, price_min, price_max, page=1):
+def build_avito_search_url(keyword, model, city, price_min, price_max, page=1, filters=None):
+  filters = filters or {}
+  color_values = filters.get("colors") or []
+  first_color = str(color_values[0]).strip() if color_values else ""
+
+  kw = (keyword or "").strip().lower()
+  mdl = (model or "").strip().lower()
+  is_iphone_flow = ("iphone" in kw) or ("iphone" in mdl) or ("apple" in kw)
+  city_slug = _city_to_slug(city)
+  base = AVITO_BASE_URL
+  if city_slug:
+    base = f"{AVITO_BASE_URL}/{city_slug}"
+
+  # Для iPhone-потока сразу в категорийный URL, чтобы страница была "фильтруемая" по UI.
+  if is_iphone_flow:
+    model_raw = (model or "").strip()
+    if not model_raw:
+      model_raw = "iphone"
+    model_slug = _latin_slug(model_raw)
+    if "iphone" not in model_slug:
+      model_slug = f"iphone_{model_slug}" if model_slug else "iphone"
+    color_slug = _color_to_path_slug(first_color) if first_color else ""
+    path = f"{base}/telefony/mobilnye_telefony/apple/{model_slug}"
+    if color_slug:
+      path = f"{path}/{color_slug}"
+    params = []
+    if price_min is not None:
+      params.append(f"pmin={price_min}")
+    if price_max is not None:
+      params.append(f"pmax={price_max}")
+    if page > 1:
+      params.append(f"p={page}")
+    params.append("cd=1")
+    return f"{path}?{'&'.join(params)}"
+
   q_parts = []
   if keyword:
     q_parts.append(keyword)
@@ -477,12 +564,6 @@ def build_avito_search_url(keyword, model, city, price_min, price_max, page=1):
     params.append(f"pmax={price_max}")
   if page > 1:
     params.append(f"p={page}")
-
-  city_slug = _city_to_slug(city)
-  base = AVITO_BASE_URL
-  if city_slug:
-    # Важно: для Avito город должен быть в пути URL, иначе выдача часто смешивается по регионам.
-    base = f"{AVITO_BASE_URL}/{city_slug}"
 
   if params:
     return f"{base}/?{'&'.join(params)}"
@@ -2261,7 +2342,9 @@ def parse_avito(
     if filtered_base_url:
       url = _build_page_url(filtered_base_url, page)
     else:
-      url = build_avito_search_url(keyword, model, city, price_min, price_max, page=page)
+      url = build_avito_search_url(keyword, model, city, price_min, price_max, page=page, filters=filters)
+      if page == 1:
+        print(f"[AVITO] Seed URL (модель/цвет/цена): {url[:320]}")
 
     # Защита: капча/блокировка — до 3 раз на КАЖДУЮ страницу (счётчик сбрасывается на новой странице),
     # пауза между раундами — смена IP у мобильного прокси.
