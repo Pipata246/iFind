@@ -23,6 +23,7 @@ from config import (
   AVITO_MAX_PAGES_PER_RUN,
   DOCUMENT_READY_TIMEOUT,
   EXPLICIT_WAIT,
+  IMPLICIT_WAIT,
   VPS_LIGHT_MODE,
 )
 
@@ -1435,34 +1436,110 @@ def _rating_variants():
 
 
 def _click_show_results_button(driver):
-  """Надежно нажимает кнопку применения фильтров («Показать N объявлений» и варианты)."""
-  xpaths = [
-    "//button[contains(normalize-space(), 'Показать') and contains(normalize-space(), 'объяв')]",
-    "//a[contains(normalize-space(), 'Показать') and contains(normalize-space(), 'объяв')]",
-    "//span[contains(normalize-space(), 'Показать') and contains(normalize-space(), 'объяв')]",
-    "//*[@role='button' and contains(., 'Показать') and contains(., 'объяв')]",
-    "//button[contains(., 'Показать')]",
-    "//span[contains(., 'Показать') and contains(., 'объяв')]",
-    "//*[contains(@class,'button') and contains(., 'Показать')]",
-    "//*[contains(normalize-space(), 'Показать') and contains(normalize-space(), 'объяв')]",
-  ]
-  for xpath in xpaths:
-    try:
-      elems = driver.find_elements(By.XPATH, xpath)
-      for elem in elems:
-        try:
-          driver.execute_script("arguments[0].scrollIntoView({block:'center'});", elem)
-          sleep(0.25)
+  """Надежно нажимает кнопку применения фильтров («Показать N объявлений» и варианты).
+
+  Без отключения implicit wait каждый ``find_elements`` по XPath может ждать до IMPLICIT_WAIT
+  секунд на несовпадение; 8 xpath × 3 попытки ≈ минуты тишины в логах.
+  """
+  try:
+    driver.implicitly_wait(0)
+  except Exception:
+    pass
+  try:
+    xpaths = [
+      "//button[contains(normalize-space(.), 'Показать') and contains(normalize-space(.), 'объяв')]",
+      "//a[contains(normalize-space(.), 'Показать') and contains(normalize-space(.), 'объяв')]",
+      "//*[@role='button' and contains(normalize-space(.), 'Показать') and contains(normalize-space(.), 'объяв')]",
+      "//*[contains(@data-marker,'filter') or contains(@data-marker,'submit') or contains(@data-marker,'apply')]"
+      "[contains(., 'Показать')][contains(., 'объяв')]",
+      "//span[contains(normalize-space(.), 'Показать') and contains(normalize-space(.), 'объяв')]",
+      "//div[contains(normalize-space(.), 'Показать') and contains(normalize-space(.), 'объяв')]",
+      "//button[contains(., 'Показать') and contains(., 'объяв')]",
+      "//a[contains(., 'Показать') and contains(., 'объяв')]",
+      "//button[contains(., 'Показать')]",
+    ]
+    for xpath in xpaths:
+      try:
+        elems = driver.find_elements(By.XPATH, xpath)
+        for elem in elems:
           try:
-            elem.click()
+            if not elem.is_displayed():
+              continue
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", elem)
+            sleep(0.2)
+            try:
+              elem.click()
+            except Exception:
+              driver.execute_script("arguments[0].click();", elem)
+            return True
           except Exception:
-            driver.execute_script("arguments[0].click();", elem)
-          return True
-        except Exception:
-          continue
+            continue
+      except Exception:
+        continue
+
+    clicked = driver.execute_script(
+      r"""
+      var show = /показать/i;
+      var ads = /объявл/i;
+      function visible(el) {
+        if (!el || !el.getBoundingClientRect) return false;
+        var r = el.getBoundingClientRect();
+        if (r.width < 2 || r.height < 2) return false;
+        var st = window.getComputedStyle(el);
+        if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') return false;
+        return true;
+      }
+      function textOf(el) {
+        return (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+      }
+      function tryClick(el) {
+        if (!visible(el)) return false;
+        try { el.scrollIntoView({block:'center', inline:'nearest'}); } catch (e) {}
+        try { el.click(); return true; } catch (e1) {}
+        try {
+          var ev = new MouseEvent('click', { bubbles: true, cancelable: true, view: window });
+          el.dispatchEvent(ev);
+          return true;
+        } catch (e2) {}
+        return false;
+      }
+      var roots = document.querySelectorAll(
+        'button, a[href], [role="button"], [data-marker*="filter"], [data-marker*="params"]'
+      );
+      var i, el, t, p, depth;
+      for (i = 0; i < roots.length; i++) {
+        el = roots[i];
+        t = textOf(el);
+        if (t.length < 6 || t.length > 140) continue;
+        if (!show.test(t) || !ads.test(t)) continue;
+        if (tryClick(el)) return true;
+      }
+      var all = document.querySelectorAll('button a, button span, a span, div[role="button"] span');
+      for (i = 0; i < all.length; i++) {
+        el = all[i];
+        t = textOf(el);
+        if (t.length < 6 || t.length > 140) continue;
+        if (!show.test(t) || !ads.test(t)) continue;
+        p = el;
+        for (depth = 0; depth < 8 && p; depth++) {
+          var tag = (p.tagName || '').toLowerCase();
+          var role = p.getAttribute && p.getAttribute('role');
+          if (tag === 'button' || tag === 'a' || role === 'button') {
+            if (tryClick(p)) return true;
+            break;
+          }
+          p = p.parentElement;
+        }
+      }
+      return false;
+      """
+    )
+    return bool(clicked)
+  finally:
+    try:
+      driver.implicitly_wait(IMPLICIT_WAIT)
     except Exception:
-      continue
-  return False
+      pass
 
 
 def _log_avito_filters_diagnostics(driver, phase: str):
