@@ -1436,6 +1436,100 @@ def _rating_variants():
   )
 
 
+def _scroll_avito_filters_to_bottom(driver):
+  """Кнопка «Показать N объявлений» внизу колонки фильтров — без прокрутки aside её не видно."""
+  try:
+    driver.execute_script(
+      r"""
+      (function() {
+        var aside = document.querySelector("aside");
+        if (aside) {
+          aside.scrollTop = aside.scrollHeight + 80;
+          try { aside.scrollTo(0, aside.scrollHeight + 80); } catch (e) {}
+        }
+        document.querySelectorAll("[class*='sidebar'],[class*='Sidebar'],[class*='filter']").forEach(function(el){
+          try {
+            if (el.scrollHeight > el.clientHeight + 30) el.scrollTop = el.scrollHeight;
+          } catch (e) {}
+        });
+        document.querySelectorAll("div[style*='overflow']").forEach(function(el){
+          try {
+            var r = el.getBoundingClientRect();
+            if (r.width > 100 && r.width < 560 && r.height > 180) el.scrollTop = el.scrollHeight;
+          } catch (e) {}
+        });
+      })();
+      """
+    )
+  except Exception:
+    pass
+  sleep(0.25)
+  try:
+    driver.execute_script("window.scrollTo(0, 0);")
+  except Exception:
+    pass
+
+
+def _url_filters_fully_committed(url: str, filters) -> bool:
+  """Полное применение в URL: localPriority или f= достаточной длины (короткий f= часто только цена)."""
+  if not _has_meaningful_avito_ui_filters(filters):
+    return True
+  try:
+    qs = parse_qs(urlparse(url or "").query, keep_blank_values=True)
+    if "localPriority" in qs or "localpriority" in (url or "").lower():
+      return True
+    fv = (qs.get("f") or [""])[0].strip()
+    if not fv:
+      return False
+    n = 0
+    for k in ("memory", "ram", "sim", "colors", "condition"):
+      n += len([x for x in (filters or {}).get(k) or [] if str(x).strip()])
+    if (filters or {}).get("rating_4_plus"):
+      n += 1
+    if str((filters or {}).get("seller_type") or "all").lower() not in ("all", ""):
+      n += 1
+    if n == 0:
+      return True
+    need = 88 + n * 18
+    return len(fv) >= min(need, 200)
+  except Exception:
+    return False
+
+
+def _wait_and_click_show_results_button(driver, stop_event=None, max_sec=40.0):
+  """Ждём появления кнопки под фильтрами: прокрутка + повторные клики."""
+  deadline = time.monotonic() + float(max_sec)
+  step = 0
+  while time.monotonic() < deadline:
+    if stop_event is not None and stop_event.is_set():
+      return False
+    step += 1
+    _scroll_avito_filters_to_bottom(driver)
+    if step % 3 == 0:
+      try:
+        driver.execute_script(
+          "window.scrollTo(0, Math.min(document.body.scrollHeight, 1200));"
+        )
+      except Exception:
+        pass
+    if step % 5 == 0:
+      try:
+        driver.execute_script(
+          r"""
+          var xp = "//*[self::button or self::a][contains(., 'Показать')][contains(., 'объяв')]";
+          var r = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+          var n = r.singleNodeValue;
+          if (n) n.scrollIntoView({block:'center', inline:'nearest'});
+          """
+        )
+      except Exception:
+        pass
+    if _click_show_results_button(driver):
+      return True
+    _sleep_with_stop(stop_event, 0.5)
+  return False
+
+
 def _click_show_results_button(driver):
   """Надежно нажимает кнопку применения фильтров («Показать N объявлений» и варианты).
 
@@ -1478,10 +1572,40 @@ def _click_show_results_button(driver):
       except Exception:
         continue
 
+    for css_sel in (
+      "aside button",
+      "[data-marker*='filter'] button",
+      "[data-marker*='serp'] button",
+      "[class*='Filters'] button",
+      "[class*='filters'] button",
+      "div[class*='sticky'] button",
+    ):
+      try:
+        for elem in driver.find_elements(By.CSS_SELECTOR, css_sel)[:45]:
+          try:
+            txt = (elem.text or "").replace("\n", " ").strip()
+            low = txt.lower()
+            if "показать" not in low or "объяв" not in low:
+              continue
+            if not elem.is_displayed():
+              continue
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", elem)
+            sleep(0.18)
+            try:
+              elem.click()
+            except Exception:
+              driver.execute_script("arguments[0].click();", elem)
+            return True
+          except Exception:
+            continue
+      except Exception:
+        continue
+
     clicked = driver.execute_script(
       r"""
       var show = /показать/i;
       var ads = /объявл/i;
+      var showNum = /показать\s+\d+/i;
       function visible(el) {
         if (!el || !el.getBoundingClientRect) return false;
         var r = el.getBoundingClientRect();
@@ -1512,7 +1636,7 @@ def _click_show_results_button(driver):
         el = roots[i];
         t = textOf(el);
         if (t.length < 6 || t.length > 140) continue;
-        if (!show.test(t) || !ads.test(t)) continue;
+        if ((!show.test(t) || !ads.test(t)) && !(showNum.test(t) && ads.test(t))) continue;
         if (tryClick(el)) return true;
       }
       var all = document.querySelectorAll('button a, button span, a span, div[role="button"] span');
@@ -1520,7 +1644,7 @@ def _click_show_results_button(driver):
         el = all[i];
         t = textOf(el);
         if (t.length < 6 || t.length > 140) continue;
-        if (!show.test(t) || !ads.test(t)) continue;
+        if ((!show.test(t) || !ads.test(t)) && !(showNum.test(t) && ads.test(t))) continue;
         p = el;
         for (depth = 0; depth < 8 && p; depth++) {
           var tag = (p.tagName || '').toLowerCase();
@@ -2111,36 +2235,37 @@ def _apply_avito_ui_filters(driver, filters, stop_event=None):
     else:
       print("[AVITO] Не найден фильтр рейтинга: 4 звезды и выше")
 
-  # На Avito после выбора фильтров часто требуется кнопка "Показать N объявлений".
-  clicked_show = False
-  for attempt in range(1, 4):
-    clicked_show = _click_show_results_button(driver)
-    if clicked_show:
-      break
-    sleep(0.9)
+  # Кнопка внизу колонки фильтров — без прокрутки и ожидания Avito не фиксирует фильтры в f=.
+  _scroll_avito_filters_to_bottom(driver)
+  sleep(0.45)
+  clicked_show = _wait_and_click_show_results_button(driver, stop_event=stop_event, max_sec=44.0)
   if clicked_show:
-    print("[AVITO] Нажал кнопку применения фильтров: 'Показать ... объявлений'.")
+    print("[AVITO] Нажал кнопку применения фильтров: «Показать … объявлений».")
   else:
-    print("[AVITO] Кнопка 'Показать ... объявлений' не найдена. Продолжаю без принудительного клика.")
-  # Дождаться обновления URL после применения (обычно появляется f= / localPriority)
-  url_changed = False
-  for _ in range(12):
-    cur = driver.current_url or ""
-    if cur and cur != pre_apply_url and ("f=" in cur or "localPriority=" in cur):
-      url_changed = True
-      break
-    sleep(0.5)
-  if not url_changed and _has_meaningful_avito_ui_filters(filters):
     print(
-      "[AVITO] После кликов URL не получил f=/localPriority. "
-      "Вероятно, кликнули не в реальные чекбоксы фильтров."
+      "[AVITO] Кнопка «Показать … объявлений» не найдена за отведённое время. "
+      "Фильтры могут не попасть в URL — будет повтор попытки на уровне парсера."
     )
-  sleep(1.0)
+  for _ in range(28):
+    cur = driver.current_url or ""
+    if cur and cur != pre_apply_url and _url_filters_fully_committed(cur, filters):
+      break
+    sleep(0.35)
+  if _has_meaningful_avito_ui_filters(filters) and not _url_filters_fully_committed(
+    driver.current_url or "", filters
+  ):
+    print(
+      "[AVITO] В адресе нет localPriority и короткий f= — похоже, выдача не приняла фильтры "
+      "(нужна кнопка «Показать объявления» под фильтрами)."
+    )
+  sleep(0.8)
+  applied["_show_clicked"] = 1 if clicked_show else 0
   print(
     "[AVITO] Фильтры применены: "
     f"memory={applied['memory']}, ram={applied['ram']}, sim={applied['sim']}, colors={applied['colors']}, "
     f"condition={applied['condition']}, seller={applied['seller_type']}, "
-    f"rating4+={applied['rating_4_plus']}"
+    f"rating4+={applied['rating_4_plus']}, show_btn={applied['_show_clicked']}, "
+    f"url_committed={_url_filters_fully_committed(driver.current_url or '', filters)}"
   )
   _log_avito_filters_diagnostics(driver, "after_filter_clicks")
   if (
@@ -3056,16 +3181,17 @@ def parse_avito(
           has_color_in_path = _url_has_expected_color_path(
             current_after_filters, (filters or {}).get("colors")
           )
+          has_f_commit = _url_filters_fully_committed(current_after_filters, filters)
           print(
             f"[AVITO] Проверка URL после фильтров (попытка {apply_try}): "
             f"has_f={has_filter_signature}, has_price={has_price_signature}, "
-            f"has_color_ok={has_color_ok} (path_slug={has_color_in_path}), ui_sum={raw_ui_sum}, "
-            f"url={current_after_filters[:320]}"
+            f"has_color_ok={has_color_ok} (path_slug={has_color_in_path}), "
+            f"f_commit={has_f_commit}, ui_sum={raw_ui_sum}, url={current_after_filters[:320]}"
           )
           if not meaningful:
             apply_ok = True
             break
-          if has_filter_signature and has_price_signature and has_color_ok:
+          if has_filter_signature and has_price_signature and has_color_ok and has_f_commit:
             if status_callback:
               try:
                 status_callback(
@@ -3082,8 +3208,9 @@ def parse_avito(
 
         if meaningful and not apply_ok:
           raise RuntimeError(
-            "Avito не подтвердил применение фильтров в URL (нет f=) после 3 попыток. "
-            "Останавливаю парсинг, чтобы не собирать неверную выдачу."
+            "Avito не подтвердил фильтры в URL: нужны localPriority или полный f= после кнопки "
+            "«Показать объявления», либо не нажата кнопка под фильтрами. "
+            "Парсинг остановлен, чтобы не собирать неверную выдачу."
           )
 
         filtered_base_url = last_url or _ensure_price_bounds_in_url(url, price_min, price_max)
