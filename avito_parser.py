@@ -2545,8 +2545,6 @@ def parse_avito(
         except Exception as e:
           print(f"[AVITO] status_callback: {e}")
       wait_block_sec = float(AVITO_BLOCK_RETRY_WAIT_SEC)
-      if page == 1:
-        wait_block_sec = min(wait_block_sec, 85.0)
       print(
         f"[AVITO] Попытка {block_round}/{AVITO_BLOCK_MAX_RETRIES_PER_PAGE} на странице {page}. "
         f"Пауза {int(wait_block_sec)} сек (новый IP у прокси), затем снова driver.get…"
