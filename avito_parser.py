@@ -390,6 +390,45 @@ def _avito_listing_shell_present(driver) -> bool:
     return False
 
 
+def _looks_like_avito_home_or_service_page(driver) -> bool:
+  """Похоже, что открылась главная/сервисная страница, а не поисковая выдача."""
+  try:
+    return bool(
+      driver.execute_script(
+        """
+        try {
+          var href = String(location.href || '').toLowerCase();
+          var path = String(location.pathname || '').toLowerCase();
+          var title = String(document.title || '').toLowerCase();
+          var txt = ((document.body && document.body.innerText) || '').toLowerCase();
+          var hasSearchCards = !!document.querySelector("a[data-marker='item-title'], [data-marker='catalog-serp']");
+          if (hasSearchCards) return false;
+          // Главная/каталог без выдачи.
+          var looksHome = (
+            title.indexOf('объявления на сайте авито') !== -1 ||
+            txt.indexOf('каталог автомобилей') !== -1 ||
+            txt.indexOf('разместить объявление') !== -1
+          );
+          // Сервисные окна/техработы.
+          var looksService = (
+            txt.indexOf('планово обновлять сайт') !== -1 ||
+            txt.indexOf('сервисы могут работать чуть медленнее') !== -1
+          );
+          // Для поисковой страницы обычно есть более глубокий путь или q/f/pmin-параметры.
+          var hasSearchQuery = (href.indexOf('?q=') !== -1 || href.indexOf('&q=') !== -1 || href.indexOf('?f=') !== -1 || href.indexOf('&f=') !== -1 || href.indexOf('pmin=') !== -1 || href.indexOf('pmax=') !== -1);
+          var deepPath = path.split('/').filter(Boolean).length >= 3;
+          if ((looksHome || looksService) && !hasSearchQuery && !deepPath) return true;
+          return false;
+        } catch (e) {
+          return false;
+        }
+        """
+      )
+    )
+  except Exception:
+    return False
+
+
 def _log_avito_empty_page_probe(driver):
   """Если выдачи нет в DOM — короткий срез текста/заголовка (капча, пустая страница, антибот)."""
   try:
@@ -2336,6 +2375,37 @@ def parse_avito(
           _sleep_with_stop(stop_event, random.uniform(3.0, 7.0))
         except Exception as e:
           print(f"[AVITO] Ошибка перезахода после блокировки: {e}")
+        continue
+
+      # Частый кейс: после "успешной" загрузки открывается главная Avito/сервисная страница,
+      # а не SERP. Не ждём долгий DOM-таймаут, сразу мягко перезаходим в целевой URL.
+      if _looks_like_avito_home_or_service_page(driver):
+        print("[AVITO] Открылась главная/сервисная страница вместо выдачи. Мягко перехожу снова на поиск…")
+        if status_callback:
+          try:
+            status_callback(
+              {
+                "phase": "dom_retry",
+                "page": int(page),
+                "dom_try": int(dom_try),
+                "dom_try_max": int(AVITO_DOM_RELOAD_TRIES),
+                "cards_ok": False,
+                "filters_panel_ok": False,
+              }
+            )
+          except Exception as e:
+            print(f"[AVITO] status_callback: {e}")
+        _sleep_with_stop(stop_event, random.uniform(8.0, 18.0))
+        try:
+          if page == 1:
+            _open_avito_with_soft_entry(driver, url, stop_event=stop_event)
+          else:
+            driver.get(url)
+          if not wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT, stop_event):
+            print("[AVITO] После возврата из главной страницы document.readyState не готов — пробую дальше.")
+          _sleep_with_stop(stop_event, random.uniform(2.0, 5.0))
+        except Exception as e:
+          print(f"[AVITO] Ошибка возврата из главной/сервисной страницы: {e}")
         continue
 
       shell_timeout = AVITO_DOM_WAIT_SHELL_FIRST if dom_try == 1 else AVITO_DOM_WAIT_SHELL_NEXT
