@@ -367,27 +367,28 @@ def _open_avito_with_soft_entry(driver, target_url: str, stop_event=None):
     seen.add(u)
     ordered_steps.append(u)
 
+  step_ready_timeout = min(45, int(DOCUMENT_READY_TIMEOUT))
   for idx, u in enumerate(ordered_steps):
     opened = False
-    # Каждый шаг входа пробуем несколько раз, чтобы не срываться из-за разового 502/TLS.
-    for step_try in range(1, 4):
+    # Каждый шаг входа пробуем ограниченно, чтобы не зависать на одном URL.
+    for step_try in range(1, 3):
       try:
         driver.get(u)
-        if not wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT, stop_event):
+        if not wait_for_document_ready(driver, step_ready_timeout, stop_event):
           raise TimeoutException("document.readyState не достиг готовности")
         opened = True
         break
       except Exception as e:
-        if step_try >= 3:
+        if step_try >= 2:
           raise
-        print(f"[AVITO] Шаг мягкого входа не открылся ({u}) попытка {step_try}/3: {e}")
+        print(f"[AVITO] Шаг мягкого входа не открылся ({u}) попытка {step_try}/2: {e}")
         # Лёгкий возврат на базовую страницу перед повтором шага.
         try:
           driver.get(AVITO_BASE_URL)
-          wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT, stop_event)
+          wait_for_document_ready(driver, step_ready_timeout, stop_event)
         except Exception:
           pass
-        _sleep_with_stop(stop_event, random.uniform(4.0, 9.0))
+        _sleep_with_stop(stop_event, random.uniform(1.5, 3.5))
 
     if not opened:
       raise TimeoutException(f"Не удалось открыть шаг мягкого входа: {u}")
@@ -398,7 +399,7 @@ def _open_avito_with_soft_entry(driver, target_url: str, stop_event=None):
     except Exception:
       pass
     if idx < len(ordered_steps) - 1:
-      _sleep_with_stop(stop_event, random.uniform(5.0, 10.0))
+      _sleep_with_stop(stop_event, random.uniform(1.8, 4.2))
 
 
 def _avito_listing_shell_present(driver) -> bool:
@@ -2349,6 +2350,7 @@ def parse_avito(
     # Защита: капча/блокировка — до 3 раз на КАЖДУЮ страницу (счётчик сбрасывается на новой странице),
     # пауза между раундами — смена IP у мобильного прокси.
     abort_page_loop = False
+    transport_failures_on_page = 0
     for block_round in range(1, AVITO_BLOCK_MAX_RETRIES_PER_PAGE + 1):
       if block_round > 1:
         print(
@@ -2429,7 +2431,9 @@ def parse_avito(
         t_fail, t_reason = _detect_avito_transport_issue(driver)
         if not t_fail:
           break
-        transport_wait = float(AVITO_BLOCK_RETRY_WAIT_SEC) + random.uniform(25.0, 60.0)
+        transport_failures_on_page += 1
+        # Транспортный сбой != блокировка Avito: не ждём слишком долго, пробуем быстрее восстановиться.
+        transport_wait = random.uniform(35.0, 75.0)
         print(
           f"[AVITO] Транспортная ошибка сети/прокси ({t_reason}). "
           f"Жду {int(transport_wait)} сек и пересоздаю сессию браузера…"
@@ -2459,6 +2463,14 @@ def parse_avito(
                   print(f"[AVITO] status_callback: {e}")
           except Exception as e:
             print(f"[AVITO] Ошибка пересоздания driver: {e}")
+        # Если транспорт разваливается подряд, не тратим 20+ минут на бесполезные циклы.
+        if transport_failures_on_page >= 3:
+          print(
+            "[AVITO] Много транспортных сбоев подряд на странице. "
+            "Прерываю страницу раньше, чтобы запуск завершался быстрее и стабильнее."
+          )
+          abort_page_loop = True
+          break
         continue
 
       msg = f"[AVITO] Обнаружена блокировка/проверка ({reason})."
@@ -2596,7 +2608,8 @@ def parse_avito(
 
       transport_dom, transport_reason_dom = _detect_avito_transport_issue(driver)
       if transport_dom:
-        transport_wait = float(AVITO_BLOCK_RETRY_WAIT_SEC) + random.uniform(25.0, 60.0)
+        transport_failures_on_page += 1
+        transport_wait = random.uniform(35.0, 75.0)
         print(
           f"[AVITO] В DOM-цикле транспортная ошибка ({transport_reason_dom}). "
           f"Жду {int(transport_wait)} сек и пересоздаю сессию браузера…"
@@ -2626,6 +2639,13 @@ def parse_avito(
                   print(f"[AVITO] status_callback: {e}")
           except Exception as e:
             print(f"[AVITO] Ошибка пересоздания driver в DOM-цикле: {e}")
+        if transport_failures_on_page >= 3:
+          print(
+            "[AVITO] Много транспортных сбоев подряд в DOM-цикле. "
+            "Прерываю страницу раньше, чтобы не зависать на длинных ожиданиях."
+          )
+          abort_page_loop = True
+          break
         continue
 
       # Частый кейс: после "успешной" загрузки открывается главная Avito/сервисная страница,
