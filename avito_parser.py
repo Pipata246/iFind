@@ -557,6 +557,41 @@ def _is_avito_blocked(driver):
   return False, ""
 
 
+def _detect_avito_transport_issue(driver):
+  """Отдельно детектим сетевые/TLS проблемы прокси-цепочки, не смешивая с антибот-блоком."""
+  try:
+    payload = driver.execute_script(
+      """
+      var t = (document.title || '').toLowerCase();
+      var b = ((document.body && document.body.innerText) || '').toLowerCase();
+      var h = ((document.documentElement && document.documentElement.outerHTML) || '').toLowerCase().slice(0, 80000);
+      var s = [t, b, h].join(' ');
+      return s.slice(0, 60000);
+      """
+    )
+  except Exception:
+    return False, ""
+  if not payload:
+    return False, ""
+  markers = (
+    "502 bad gateway",
+    "this site can’t be reached",
+    "this site can't be reached",
+    "tlsprotocolexception",
+    "ssl handshake error",
+    "unexpected eof",
+    "econnreset",
+    "broken pipe",
+    "tcpdisconnect",
+    "epipe",
+    "syscallerror",
+  )
+  for m in markers:
+    if m in payload:
+      return True, m
+  return False, ""
+
+
 def _norm_filter_text(s):
   if s is None:
     return ""
@@ -2144,6 +2179,7 @@ def parse_avito(
   raise_on_block=False,
   today_only=False,
   status_callback=None,
+  driver_recreate_callback=None,
 ):
   """Поэтапно: одна страница → пауза → скролл по шагам → сбор → длинная пауза → следующая страница."""
   params = _precision_params(precision)
@@ -2260,7 +2296,40 @@ def parse_avito(
       print("[AVITO] Проверка страницы на ограничение доступа…")
       blocked, reason = _is_avito_blocked(driver)
       if not blocked:
-        break
+        t_fail, t_reason = _detect_avito_transport_issue(driver)
+        if not t_fail:
+          break
+        transport_wait = float(AVITO_BLOCK_RETRY_WAIT_SEC) + random.uniform(25.0, 60.0)
+        print(
+          f"[AVITO] Транспортная ошибка сети/прокси ({t_reason}). "
+          f"Жду {int(transport_wait)} сек и пересоздаю сессию браузера…"
+        )
+        if status_callback:
+          try:
+            status_callback(
+              {
+                "phase": "transport_issue",
+                "page": int(page),
+                "reason": str(t_reason or ""),
+                "wait_sec": int(transport_wait),
+              }
+            )
+          except Exception as e:
+            print(f"[AVITO] status_callback: {e}")
+        _sleep_with_stop(stop_event, transport_wait)
+        if driver_recreate_callback is not None:
+          try:
+            new_driver = driver_recreate_callback()
+            if new_driver is not None:
+              driver = new_driver
+              if status_callback:
+                try:
+                  status_callback({"phase": "driver_recreated", "page": int(page)})
+                except Exception as e:
+                  print(f"[AVITO] status_callback: {e}")
+          except Exception as e:
+            print(f"[AVITO] Ошибка пересоздания driver: {e}")
+        continue
 
       msg = f"[AVITO] Обнаружена блокировка/проверка ({reason})."
       print(msg)
@@ -2393,6 +2462,40 @@ def parse_avito(
           _sleep_with_stop(stop_event, random.uniform(3.0, 7.0))
         except Exception as e:
           print(f"[AVITO] Ошибка перезахода после блокировки: {e}")
+        continue
+
+      transport_dom, transport_reason_dom = _detect_avito_transport_issue(driver)
+      if transport_dom:
+        transport_wait = float(AVITO_BLOCK_RETRY_WAIT_SEC) + random.uniform(25.0, 60.0)
+        print(
+          f"[AVITO] В DOM-цикле транспортная ошибка ({transport_reason_dom}). "
+          f"Жду {int(transport_wait)} сек и пересоздаю сессию браузера…"
+        )
+        if status_callback:
+          try:
+            status_callback(
+              {
+                "phase": "transport_issue",
+                "page": int(page),
+                "reason": str(transport_reason_dom or ""),
+                "wait_sec": int(transport_wait),
+              }
+            )
+          except Exception as e:
+            print(f"[AVITO] status_callback: {e}")
+        _sleep_with_stop(stop_event, transport_wait)
+        if driver_recreate_callback is not None:
+          try:
+            new_driver = driver_recreate_callback()
+            if new_driver is not None:
+              driver = new_driver
+              if status_callback:
+                try:
+                  status_callback({"phase": "driver_recreated", "page": int(page)})
+                except Exception as e:
+                  print(f"[AVITO] status_callback: {e}")
+          except Exception as e:
+            print(f"[AVITO] Ошибка пересоздания driver в DOM-цикле: {e}")
         continue
 
       # Частый кейс: после "успешной" загрузки открывается главная Avito/сервисная страница,
