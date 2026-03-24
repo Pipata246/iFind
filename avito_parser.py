@@ -1542,9 +1542,27 @@ def _ensure_price_bounds_in_url(url: str, price_min, price_max) -> str:
 
 
 def _has_filter_signature(url: str) -> bool:
-  """UI-фильтры Avito считаем применёнными только при наличии query-подписи f=."""
-  u = (url or "").lower()
-  return ("?f=" in u) or ("&f=" in u)
+  """UI-фильтры Avito считаем применёнными только при реальном query-параметре f."""
+  try:
+    p = urlparse(url or "")
+    qs = parse_qs(p.query, keep_blank_values=True)
+    return "f" in qs and bool((qs.get("f") or [""])[0].strip())
+  except Exception:
+    return False
+
+
+def _url_has_expected_price_bounds(url: str, price_min, price_max) -> bool:
+  """Проверка, что pmin/pmax присутствуют и совпадают с ожидаемыми (если заданы)."""
+  try:
+    p = urlparse(url or "")
+    qs = parse_qs(p.query, keep_blank_values=True)
+    if price_min is not None and str(price_min) != str((qs.get("pmin") or [""])[0]).strip():
+      return False
+    if price_max is not None and str(price_max) != str((qs.get("pmax") or [""])[0]).strip():
+      return False
+    return True
+  except Exception:
+    return False
 
 
 def _has_meaningful_avito_ui_filters(filters):
@@ -2574,14 +2592,16 @@ def parse_avito(
             int(ui_applied.get(k, 0)) for k in ("memory", "ram", "sim", "colors", "condition", "rating_4_plus")
           )
           has_filter_signature = _has_filter_signature(current_after_filters)
+          has_price_signature = _url_has_expected_price_bounds(current_after_filters, price_min, price_max)
           print(
             f"[AVITO] Проверка URL после фильтров (попытка {apply_try}): "
-            f"has_f={has_filter_signature}, ui_sum={raw_ui_sum}, url={current_after_filters[:320]}"
+            f"has_f={has_filter_signature}, has_price={has_price_signature}, "
+            f"ui_sum={raw_ui_sum}, url={current_after_filters[:320]}"
           )
           if not meaningful:
             apply_ok = True
             break
-          if has_filter_signature:
+          if has_filter_signature and has_price_signature:
             if status_callback:
               try:
                 status_callback(
@@ -2631,6 +2651,13 @@ def parse_avito(
         # Avito sometimes returns a broken/empty state after applying UI filters.
         # Fallback: retry from base query without UI filters to avoid empty result runs.
         if filters and not fallback_without_ui_filters_done:
+          if _has_meaningful_avito_ui_filters(filters):
+            print(
+              "[AVITO] После применения UI-фильтров карточки не найдены на странице 1. "
+              "Безопасный режим: НЕ переключаюсь на парсинг без фильтров, "
+              "чтобы не вернуть неверную широкую выдачу."
+            )
+            break
           print(
             "[AVITO] После UI-фильтров карточки не найдены на странице 1. "
             "Повторяю поиск без UI-фильтров как fallback."
