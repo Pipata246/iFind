@@ -307,20 +307,45 @@ def _open_avito_with_soft_entry(driver, target_url: str, stop_event=None):
   steps.append(target_url)
 
   seen = set()
-  for idx, u in enumerate([x for x in steps if x]):
+  ordered_steps = []
+  for u in [x for x in steps if x]:
     if u in seen:
       continue
     seen.add(u)
-    driver.get(u)
-    if not wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT, stop_event):
-      raise TimeoutException("document.readyState не достиг готовности")
+    ordered_steps.append(u)
+
+  for idx, u in enumerate(ordered_steps):
+    opened = False
+    # Каждый шаг входа пробуем несколько раз, чтобы не срываться из-за разового 502/TLS.
+    for step_try in range(1, 4):
+      try:
+        driver.get(u)
+        if not wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT, stop_event):
+          raise TimeoutException("document.readyState не достиг готовности")
+        opened = True
+        break
+      except Exception as e:
+        if step_try >= 3:
+          raise
+        print(f"[AVITO] Шаг мягкого входа не открылся ({u}) попытка {step_try}/3: {e}")
+        # Лёгкий возврат на базовую страницу перед повтором шага.
+        try:
+          driver.get(AVITO_BASE_URL)
+          wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT, stop_event)
+        except Exception:
+          pass
+        _sleep_with_stop(stop_event, random.uniform(4.0, 9.0))
+
+    if not opened:
+      raise TimeoutException(f"Не удалось открыть шаг мягкого входа: {u}")
+
     # Мини-скролл + пауза как у человека перед следующим шагом.
     try:
       driver.execute_script("window.scrollTo(0, Math.min(600, document.body.scrollHeight));")
     except Exception:
       pass
-    if idx < len(steps) - 1:
-      _sleep_with_stop(stop_event, random.uniform(4.0, 8.5))
+    if idx < len(ordered_steps) - 1:
+      _sleep_with_stop(stop_event, random.uniform(5.0, 10.0))
 
 
 def _avito_listing_shell_present(driver) -> bool:
@@ -2110,7 +2135,7 @@ def parse_avito(
       else:
         print(f"[AVITO] Страница {page}/{max_pages}: загрузка…")
       if page == 1:
-        print("[AVITO] Мягкий вход: главная -> город -> поиск.")
+        print("[AVITO] Мягкий вход: главная -> город -> категория -> поиск (с повторами шагов).")
       if status_callback:
         try:
           status_callback(
