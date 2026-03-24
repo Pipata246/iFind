@@ -36,6 +36,50 @@ _QUICK_FILTER_COLLECT_CAP = 220
 _QUICK_FILTER_SCAN_CAP = 80
 _ROOT_CANDIDATES_CAP = 90
 
+# Сегмент пути сразу после .../mobilnye_telefony/apple/ (как в рабочей выдаче Avito).
+# Хвост ASgBAg* — каталожный идентификатор линейки; при новых моделях добавьте ключ из URL на сайте.
+AVITO_IPHONE_APPLE_SEGMENTS: dict[str, str] = {
+  "iphone_15": "iphone_15-ASgBAgICA0SywA2SoO0RtMANzqs5sMENiPw3",
+}
+
+
+def _normalize_iphone_model_path_key(keyword: str, model: str) -> str | None:
+  """iphone_15, iphone_15_pro_max, … для подстановки в каталожный URL /apple/…"""
+  raw = f"{keyword or ''} {model or ''}".lower()
+  raw = raw.replace("ё", "е").replace("айфон", "iphone")
+  if "iphone" not in raw:
+    return None
+  if re.search(r"iphone\s*se\b", raw) or re.search(r"\bse\s*\(?20\d{2}", raw):
+    return "iphone_se"
+  m = re.search(r"iphone\D{0,12}(\d{1,2})\b", raw)
+  if not m:
+    return None
+  n = m.group(1)
+  rest = raw[m.end() : m.end() + 28]
+  suf = ""
+  if re.match(r"^\s*(pro\s*max|pro max)\b", rest):
+    suf = "_pro_max"
+  elif re.match(r"^\s*pro\b", rest):
+    suf = "_pro"
+  elif re.match(r"^\s*plus\b", rest):
+    suf = "_plus"
+  elif re.match(r"^\s*mini\b", rest):
+    suf = "_mini"
+  return f"iphone_{n}{suf}"
+
+
+def _resolve_avito_iphone_apple_segment(keyword: str, model: str) -> str | None:
+  key = _normalize_iphone_model_path_key(keyword, model)
+  if not key:
+    return None
+  seg = AVITO_IPHONE_APPLE_SEGMENTS.get(key)
+  if seg:
+    return seg
+  bare = re.sub(r"_(pro_max|pro|plus|mini)$", "", key)
+  if bare != key:
+    return AVITO_IPHONE_APPLE_SEGMENTS.get(bare)
+  return None
+
 
 def _filters_to_excel_meta(filters, *, applied_mode: str = "", ui_applied_note: str = ""):
   """Запрос пользователя + как реально отобрали (UI / текст карточек)."""
@@ -329,7 +373,10 @@ def _open_avito_with_soft_entry(driver, target_url: str, stop_event=None, includ
   steps = [AVITO_BASE_URL] if include_home else []
   if city_slug:
     steps.append(f"{AVITO_BASE_URL}/{city_slug}")
-    steps.append(f"{AVITO_BASE_URL}/{city_slug}/telefony/mobilnye_telefony")
+    # «Голая» выдача /mobilnye_telefony без /apple/... в ряде городов даёт 404 — пропускаем, если цель уже apple/….
+    tgt = target_url or ""
+    if "/apple/" not in tgt:
+      steps.append(f"{AVITO_BASE_URL}/{city_slug}/telefony/mobilnye_telefony")
   steps.append(target_url)
 
   seen = set()
@@ -517,18 +564,10 @@ def build_avito_search_url(keyword, model, city, price_min, price_max, page=1, f
   if city_slug:
     base = f"{AVITO_BASE_URL}/{city_slug}"
 
-  # Для iPhone-потока — только раздел «мобильные телефоны» в городе. Сегмент /apple в пути на выдаче
-  # часто отдаёт 404 (бренд задаётся фильтрами f=…, а не отдельной «папкой» в URL).
+  # iPhone: выдача /mobilnye_telefony/apple/{iphone_N-ASgBAg…}?cd=1&pmin&pmax…; остальное — в UI.
   if is_iphone_flow:
-    path = f"{base}/telefony/mobilnye_telefony"
+    segment = _resolve_avito_iphone_apple_segment(keyword, model)
     params = []
-    q_parts = []
-    if keyword:
-      q_parts.append(keyword)
-    if model:
-      q_parts.append(model)
-    if q_parts:
-      params.append(f"q={'+'.join(q_parts)}")
     if price_min is not None:
       params.append(f"pmin={price_min}")
     if price_max is not None:
@@ -536,7 +575,25 @@ def build_avito_search_url(keyword, model, city, price_min, price_max, page=1, f
     if page > 1:
       params.append(f"p={page}")
     params.append("cd=1")
-    return f"{path}?{'&'.join(params)}"
+    if segment:
+      path = f"{base}/telefony/mobilnye_telefony/apple/{segment}"
+      return f"{path}?{'&'.join(params)}"
+    q_parts = []
+    if keyword:
+      q_parts.append(keyword)
+    if model:
+      q_parts.append(model)
+    params_q = []
+    if q_parts:
+      params_q.append(f"q={'+'.join(q_parts)}")
+    if price_min is not None:
+      params_q.append(f"pmin={price_min}")
+    if price_max is not None:
+      params_q.append(f"pmax={price_max}")
+    if page > 1:
+      params_q.append(f"p={page}")
+    params_q.append("cd=1")
+    return f"{base}/?{'&'.join(params_q)}" if params_q else base
 
   q_parts = []
   if keyword:
