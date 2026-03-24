@@ -375,16 +375,7 @@ async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFA
   def _sync_once():
     driver = None
     try:
-      show_browser = str(os.getenv("TELEGRAM_SHOW_BROWSER", "false")).strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "y",
-        "on",
-      )
-      driver = build_driver(headless=not show_browser)
-      if show_browser:
-        print("[bot] Отладка: браузер запущен в видимом режиме (TELEGRAM_SHOW_BROWSER=true).")
+      driver = build_driver(headless=True)
       context.user_data["active_parse"]["driver"] = driver
 
       def _notify(payload: dict):
