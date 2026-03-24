@@ -409,13 +409,18 @@ async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFA
   supabase: Client = context.bot_data.get("supabase_client")
   telegram_id = update.effective_user.id
 
-  settings = get_manual_settings(supabase, telegram_id)
-  if not settings:
+  manual_row = get_manual_settings(supabase, telegram_id)
+  auto_row = get_user_settings(supabase, telegram_id)
+  if not manual_row and not auto_row:
     await update.message.reply_text(
-      "Нет настроек ручного запуска в базе. Сначала задайте их в мастере или нажмите «с моими настройками».",
+      "Нет настроек: ни ручного запуска (bot_manual_settings), ни автопарсинга (bot_settings). "
+      "Задайте их в «⚙️ Настройки автопарсинга» или в мастере ручного запуска.",
       reply_markup=build_main_keyboard(),
     )
     return
+  settings, filled_from_auto = merge_manual_settings_with_autoparse(manual_row, auto_row)
+  if filled_from_auto:
+    print(f"[bot] Настройки: дополнено из bot_settings (как при автопарсинге): {', '.join(filled_from_auto)}")
 
   keyword = settings.get("keyword")
   model = settings.get("model")
@@ -700,6 +705,39 @@ def get_manual_settings(client: Client, telegram_id: int):
   except Exception as e:
     print(f"[Supabase] Ошибка get_manual_settings: {e}")
     return None
+
+
+def merge_manual_settings_with_autoparse(manual: dict | None, auto: dict | None) -> tuple[dict, list]:
+  """Ручная строка (bot_manual_settings) в приоритете; пустые поля добираем из bot_settings.
+
+  Раньше автопарсинг читал только bot_settings — там часто полный набор фильтров.
+  Ручной запуск мог сохранить неполную строку → фильтры «пропадали». Слияние выравнивает поведение.
+  """
+  manual = dict(manual or {})
+  auto = dict(auto or {})
+  filled: list[str] = []
+  out = {**auto, **manual}
+  for k in ("memory", "ram", "sim", "colors", "condition"):
+    if not out.get(k) and auto.get(k):
+      out[k] = auto[k]
+      filled.append(k)
+  for k in ("keyword", "model", "city", "price_min", "price_max", "precision"):
+    if out.get(k) in (None, "") and auto.get(k) not in (None, ""):
+      out[k] = auto[k]
+      filled.append(k)
+  if out.get("seller_type") in (None, "") and auto.get("seller_type") not in (None, ""):
+    out["seller_type"] = auto["seller_type"]
+    filled.append("seller_type")
+  # rating_4_plus: берётся из {**auto, **manual}; явное значение в ручной строке не перезаписываем.
+  if manual:
+    out["today_only"] = bool(manual.get("today_only"))
+  else:
+    out["today_only"] = False
+  try:
+    out["precision"] = int(out.get("precision") or 7)
+  except (TypeError, ValueError):
+    out["precision"] = 7
+  return out, filled
 
 
 def bot_settings_to_manual_dict(bot: dict) -> dict:
