@@ -1908,6 +1908,140 @@ def _build_page_url(base_url, page):
   return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
 
 
+def _normalize_avito_listing_base_url(url: str) -> str:
+  """База выдачи: без p= (страница задаётся отдельно)."""
+  if not url:
+    return url
+  try:
+    p = urlparse(url)
+    q = dict(parse_qsl(p.query, keep_blank_values=True))
+    q.pop("p", None)
+    return urlunparse((p.scheme, p.netloc, p.path, p.params, urlencode(q, doseq=True), p.fragment))
+  except Exception:
+    return url
+
+
+def _f_param_length(url: str) -> int:
+  try:
+    qs = parse_qs(urlparse(url or "").query, keep_blank_values=True)
+    return len((qs.get("f") or [""])[0].strip())
+  except Exception:
+    return 0
+
+
+def _enrich_listing_base_url_from_dom(driver, current_url: str) -> str:
+  """В адресной строке часто нет f=, тогда как в canonical/ссылках пагинации — полный f= (нужен для driver.get на стр.2+)."""
+  if _f_param_length(current_url) >= 60:
+    return _normalize_avito_listing_base_url(current_url)
+  cur_path = ""
+  try:
+    cur_path = urlparse(current_url or "").path
+  except Exception:
+    pass
+  try:
+    href = driver.execute_script(
+      """
+      var best = '';
+      var bestLen = 0;
+      var c = document.querySelector('link[rel="canonical"]');
+      if (c && c.href && c.href.indexOf('f=') > -1) { best = c.href; }
+      if (!best) {
+        var nodes = document.querySelectorAll('a[href*="f="]');
+        for (var i = 0; i < Math.min(nodes.length, 150); i++) {
+          var h = nodes[i].href || '';
+          if (h.indexOf('avito.ru') === -1) continue;
+          var m = h.match(/[?&]f=([^&]+)/);
+          var L = m ? m[1].length : 0;
+          if (L > bestLen) { bestLen = L; best = h; }
+        }
+      }
+      return best || '';
+      """
+    )
+    href = (href or "").strip()
+    if not href or _f_param_length(href) < 60:
+      return current_url
+    try:
+      hp = urlparse(href).path.rstrip("/")
+      cp = (cur_path or "").rstrip("/")
+      if cp and hp and hp != cp:
+        return current_url
+    except Exception:
+      pass
+    out = _normalize_avito_listing_base_url(href)
+    print(f"[AVITO] URL выдачи дополнен из DOM (canonical/ссылка с f=), длина f≈{_f_param_length(out)}.")
+    return out
+  except Exception:
+    return current_url
+
+
+def _try_click_avito_pagination_page(driver, target_page: int, stop_event=None) -> bool:
+  """Переход на страницу N кликом по пагинации — сохраняет SPA-состояние, если GET по «голому» URL сбрасывает фильтры."""
+  if target_page <= 1:
+    return True
+  try:
+    driver.implicitly_wait(0)
+  except Exception:
+    pass
+  try:
+    clicked = driver.execute_script(
+      """
+      var want = arguments[0];
+      var roots = document.querySelectorAll(
+        '[data-marker*="pagination"], nav[aria-label*="Страниц"], [class*="Pagination"], [data-marker="pagination"]'
+      );
+      var candidates = [];
+      for (var r = 0; r < roots.length; r++) {
+        var as = roots[r].querySelectorAll('a[href]');
+        for (var j = 0; j < as.length; j++) candidates.push(as[j]);
+      }
+      if (candidates.length < 1) {
+        document.querySelectorAll('a[href*="avito.ru"][href*="&p="], a[href*="avito.ru"][href*="?p="]').forEach(
+          function(a){ candidates.push(a); }
+        );
+      }
+      function pnum(h) {
+        try {
+          var u = new URL(h, location.href);
+          var p = u.searchParams.get('p');
+          return p ? parseInt(p, 10) : 0;
+        } catch (e) { return 0; }
+      }
+      for (var i = 0; i < candidates.length; i++) {
+        var a = candidates[i];
+        var h = a.getAttribute('href') || '';
+        var t = (a.textContent || '').replace(/\\s+/g, ' ').trim();
+        if (t === String(want) || pnum(h) === want) {
+          try {
+            a.scrollIntoView({block:'center', inline:'nearest'});
+            a.click();
+            return true;
+          } catch (e) {}
+        }
+      }
+      return false;
+      """,
+      int(target_page),
+    )
+    if not clicked:
+      return False
+    _sleep_with_stop(stop_event, random.uniform(0.8, 1.6))
+    deadline = time.monotonic() + 35.0
+    while time.monotonic() < deadline:
+      if stop_event is not None and stop_event.is_set():
+        return False
+      try:
+        u = (driver.current_url or "").lower()
+        if f"p={target_page}" in u or f"&p={target_page}" in u:
+          return True
+      except Exception:
+        pass
+      _sleep_with_stop(stop_event, 0.35)
+    return True
+  except Exception:
+    return False
+
+
 def _ensure_price_bounds_in_url(url: str, price_min, price_max) -> str:
   """Гарантирует, что pmin/pmax не потеряются после UI-кликов/редиректов Avito."""
   if not url:
@@ -2625,8 +2759,15 @@ def parse_avito(
       break
     if filtered_base_url:
       url = _build_page_url(filtered_base_url, page)
+      # Без длинного f= в базе GET на ?p=2 часто отдаёт выдачу без UI-фильтров — переходим кликом.
+      prefer_ui_pagination = (
+        page > 1
+        and _has_meaningful_avito_ui_filters(filters or {})
+        and _f_param_length(filtered_base_url) < 60
+      )
     else:
       url = build_avito_search_url(keyword, model, city, price_min, price_max, page=page, filters=filters)
+      prefer_ui_pagination = False
       if page == 1:
         print(f"[AVITO] Seed URL (модель/цвет/цена): {url[:320]}")
 
@@ -2690,7 +2831,13 @@ def parse_avito(
                 driver, url, stop_event=stop_event, include_home=False, reset_session=True
               )
           else:
-            driver.get(url)
+            if prefer_ui_pagination and _try_click_avito_pagination_page(driver, page, stop_event):
+              print(
+                f"[AVITO] Страница {page}: открыта кликом по пагинации "
+                "(в базовом URL нет длинного f= — прямой GET мог бы сбросить фильтры)."
+              )
+            else:
+              driver.get(url)
           print(
             f"[AVITO] Ожидание готовности страницы (до {DOCUMENT_READY_TIMEOUT} сек, "
             "без ожидания полной загрузки ресурсов)…"
@@ -3254,6 +3401,8 @@ def parse_avito(
             "успешные клики по всем запрошенным фильтрам). Парсинг остановлен."
           )
 
+        last_url = _enrich_listing_base_url_from_dom(driver, last_url)
+        last_url = _ensure_price_bounds_in_url(last_url, price_min, price_max)
         filtered_base_url = last_url or _ensure_price_bounds_in_url(url, price_min, price_max)
         if filtered_base_url:
           print(f"[AVITO] URL после фильтров: {filtered_base_url[:320]}")
