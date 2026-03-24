@@ -2246,14 +2246,27 @@ def parse_avito(
     need_filters_panel = bool(
       page == 1 and filters and not fallback_without_ui_filters_done and _has_meaningful_avito_ui_filters(filters)
     )
+    if status_callback:
+      try:
+        status_callback(
+          {
+            "phase": "dom_wait",
+            "page": int(page),
+            "need_filters_panel": bool(need_filters_panel),
+            "dom_try_max": int(AVITO_DOM_RELOAD_TRIES),
+          }
+        )
+      except Exception as e:
+        print(f"[AVITO] status_callback: {e}")
     ui_filters_temporarily_disabled = False
     dom_ready = False
     for dom_try in range(1, AVITO_DOM_RELOAD_TRIES + 1):
       blocked_dom, blocked_reason_dom = _is_avito_blocked(driver)
       if blocked_dom:
+        soft_wait = float(AVITO_BLOCK_RETRY_WAIT_SEC) + random.uniform(18.0, 45.0)
         print(
           f"[AVITO] Во время ожидания DOM обнаружена блокировка ({blocked_reason_dom}). "
-          f"Жду {AVITO_BLOCK_RETRY_WAIT_SEC} сек и перезахожу на страницу…"
+          f"Жду {int(soft_wait)} сек и мягко перезахожу на страницу…"
         )
         if status_callback:
           try:
@@ -2273,22 +2286,29 @@ def parse_avito(
               {
                 "phase": "block_retry_wait",
                 "page": int(page),
-                "wait_sec": int(AVITO_BLOCK_RETRY_WAIT_SEC),
+                "wait_sec": int(soft_wait),
                 "next_round": int(min(dom_try + 1, AVITO_DOM_RELOAD_TRIES)),
                 "block_round_max": int(AVITO_DOM_RELOAD_TRIES),
               }
             )
           except Exception as e:
             print(f"[AVITO] status_callback: {e}")
-        _sleep_with_stop(stop_event, float(AVITO_BLOCK_RETRY_WAIT_SEC))
+        _sleep_with_stop(stop_event, soft_wait)
         if stop_event is not None and stop_event.is_set():
           abort_page_loop = True
           break
         try:
-          driver.get(url)
+          if page == 1:
+            _open_avito_with_soft_entry(driver, url, stop_event=stop_event)
+          else:
+            driver.get(AVITO_BASE_URL)
+            if not wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT, stop_event):
+              print("[AVITO] Домашняя страница Avito не успела прогрузиться после блокировки.")
+            _sleep_with_stop(stop_event, random.uniform(2.0, 4.5))
+            driver.get(url)
           if not wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT, stop_event):
             print("[AVITO] После перезахода при блокировке document.readyState не готов — пробую дальше.")
-          _sleep_with_stop(stop_event, 2.5)
+          _sleep_with_stop(stop_event, random.uniform(3.0, 7.0))
         except Exception as e:
           print(f"[AVITO] Ошибка перезахода после блокировки: {e}")
         continue
@@ -2324,9 +2344,10 @@ def parse_avito(
       _log_avito_empty_page_probe(driver)
       blocked_after_probe, blocked_reason_after_probe = _is_avito_blocked(driver)
       if blocked_after_probe:
+        soft_wait = float(AVITO_BLOCK_RETRY_WAIT_SEC) + random.uniform(18.0, 45.0)
         print(
           f"[AVITO] После probe обнаружена блокировка ({blocked_reason_after_probe}). "
-          f"Жду {AVITO_BLOCK_RETRY_WAIT_SEC} сек и перезахожу на страницу…"
+          f"Жду {int(soft_wait)} сек и мягко перезахожу на страницу…"
         )
         if status_callback:
           try:
@@ -2346,22 +2367,29 @@ def parse_avito(
               {
                 "phase": "block_retry_wait",
                 "page": int(page),
-                "wait_sec": int(AVITO_BLOCK_RETRY_WAIT_SEC),
+                "wait_sec": int(soft_wait),
                 "next_round": int(min(dom_try + 1, AVITO_DOM_RELOAD_TRIES)),
                 "block_round_max": int(AVITO_DOM_RELOAD_TRIES),
               }
             )
           except Exception as e:
             print(f"[AVITO] status_callback: {e}")
-        _sleep_with_stop(stop_event, float(AVITO_BLOCK_RETRY_WAIT_SEC))
+        _sleep_with_stop(stop_event, soft_wait)
         if stop_event is not None and stop_event.is_set():
           abort_page_loop = True
           break
         try:
-          driver.get(url)
+          if page == 1:
+            _open_avito_with_soft_entry(driver, url, stop_event=stop_event)
+          else:
+            driver.get(AVITO_BASE_URL)
+            if not wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT, stop_event):
+              print("[AVITO] Домашняя страница Avito не успела прогрузиться после probe-блокировки.")
+            _sleep_with_stop(stop_event, random.uniform(2.0, 4.5))
+            driver.get(url)
           if not wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT, stop_event):
             print("[AVITO] После перезахода после probe document.readyState не готов — пробую дальше.")
-          _sleep_with_stop(stop_event, 2.5)
+          _sleep_with_stop(stop_event, random.uniform(3.0, 7.0))
         except Exception as e:
           print(f"[AVITO] Ошибка перезахода после probe-блокировки: {e}")
         continue
@@ -2369,6 +2397,20 @@ def parse_avito(
         f"[AVITO] DOM не готов (попытка {dom_try}/{AVITO_DOM_RELOAD_TRIES}): "
         f"cards={'ok' if shell_ok else 'none'}, filters_panel={'ok' if filters_panel_ok else 'none'}."
       )
+      if status_callback:
+        try:
+          status_callback(
+            {
+              "phase": "dom_retry",
+              "page": int(page),
+              "dom_try": int(dom_try),
+              "dom_try_max": int(AVITO_DOM_RELOAD_TRIES),
+              "cards_ok": bool(shell_ok),
+              "filters_panel_ok": bool(filters_panel_ok),
+            }
+          )
+        except Exception as e:
+          print(f"[AVITO] status_callback: {e}")
       if dom_try >= AVITO_DOM_RELOAD_TRIES:
         break
       print("[AVITO] Перезагружаю страницу и жду DOM снова…")
@@ -2412,6 +2454,18 @@ def parse_avito(
         for apply_try in range(1, max_apply_attempts + 1):
           if apply_try > 1:
             print(f"[AVITO] Повторное применение UI-фильтров: попытка {apply_try}/{max_apply_attempts}…")
+            if status_callback:
+              try:
+                status_callback(
+                  {
+                    "phase": "filters_retry",
+                    "page": int(page),
+                    "apply_try": int(apply_try),
+                    "apply_try_max": int(max_apply_attempts),
+                  }
+                )
+              except Exception as e:
+                print(f"[AVITO] status_callback: {e}")
             _open_avito_with_soft_entry(driver, url, stop_event=stop_event)
             if not wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT, stop_event):
               raise TimeoutException("document.readyState не достиг готовности при повторном применении фильтров")
@@ -2433,6 +2487,17 @@ def parse_avito(
             apply_ok = True
             break
           if has_filter_signature:
+            if status_callback:
+              try:
+                status_callback(
+                  {
+                    "phase": "filters_applied_url",
+                    "page": int(page),
+                    "url": str(current_after_filters or "")[:320],
+                  }
+                )
+              except Exception as e:
+                print(f"[AVITO] status_callback: {e}")
             apply_ok = True
             break
 
@@ -2556,6 +2621,19 @@ def parse_avito(
         print(f"[AVITO] Режим «только сегодня»: отфильтровано {dropped} объявлений (нет даты / не сегодня).")
 
     all_items.extend(_enrich_items_with_filter_meta(unique_items, filter_meta))
+    if status_callback:
+      try:
+        status_callback(
+          {
+            "phase": "page_parsed",
+            "page": int(page),
+            "added": int(len(unique_items)),
+            "total_collected": int(len(all_items)),
+            "cards_seen": int(len(cards) if cards else 0),
+          }
+        )
+      except Exception as e:
+        print(f"[AVITO] status_callback: {e}")
     # Не выходим из-за «мало карточек», если ещё есть страницы по пагинации (иначе обрыв на 1-й странице).
     if not used_html_fallback and len(cards) < 20:
       if page >= effective_max_pages:
@@ -2595,6 +2673,11 @@ def parse_avito(
     item.update(final_meta)
 
   print(f"[AVITO] Всего объявлений (с повторами): {len(all_items)}")
+  if status_callback:
+    try:
+      status_callback({"phase": "parse_finished", "total_items": int(len(all_items))})
+    except Exception as e:
+      print(f"[AVITO] status_callback: {e}")
   if not all_items:
     print(
       "[AVITO] ⚠ Итог 0 объявлений. Частые причины: блокировка Avito, режим «только сегодня» "

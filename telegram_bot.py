@@ -248,6 +248,57 @@ async def _emit_avito_parse_status(update: Update, payload: dict):
       f"Завершаю текущий запуск с уже собранными объявлениями: {cnt}.",
       reply_markup=build_stop_keyboard(),
     )
+  elif phase == "dom_wait":
+    page = int(payload.get("page") or 1)
+    need_filters = bool(payload.get("need_filters_panel"))
+    tries = int(payload.get("dom_try_max") or 5)
+    msg = (
+      f"Страница {page}: жду появление карточек и панели фильтров (до {tries} перезаходов)…"
+      if need_filters
+      else f"Страница {page}: жду появление карточек в DOM (до {tries} перезаходов)…"
+    )
+    await update.message.reply_text(msg, reply_markup=build_stop_keyboard())
+  elif phase == "dom_retry":
+    page = int(payload.get("page") or 1)
+    dom_try = int(payload.get("dom_try") or 1)
+    dom_try_max = int(payload.get("dom_try_max") or 5)
+    cards_ok = bool(payload.get("cards_ok"))
+    filters_ok = bool(payload.get("filters_panel_ok"))
+    await update.message.reply_text(
+      f"DOM не готов на странице {page}: попытка {dom_try}/{dom_try_max} "
+      f"(cards={'ok' if cards_ok else 'none'}, filters={'ok' if filters_ok else 'none'}). Перезахожу…",
+      reply_markup=build_stop_keyboard(),
+    )
+  elif phase == "filters_retry":
+    page = int(payload.get("page") or 1)
+    apply_try = int(payload.get("apply_try") or 1)
+    apply_try_max = int(payload.get("apply_try_max") or 3)
+    await update.message.reply_text(
+      f"Повторяю применение UI-фильтров на странице {page}: попытка {apply_try}/{apply_try_max}.",
+      reply_markup=build_stop_keyboard(),
+    )
+  elif phase == "filters_applied_url":
+    page = int(payload.get("page") or 1)
+    url = str(payload.get("url") or "")
+    await update.message.reply_text(
+      f"Фильтры подтверждены URL (страница {page}).\n{url}",
+      reply_markup=build_stop_keyboard(),
+    )
+  elif phase == "page_parsed":
+    page = int(payload.get("page") or 1)
+    added = int(payload.get("added") or 0)
+    total = int(payload.get("total_collected") or 0)
+    cards_seen = int(payload.get("cards_seen") or 0)
+    await update.message.reply_text(
+      f"Страница {page} обработана: карточек {cards_seen}, добавлено {added}, всего собрано {total}.",
+      reply_markup=build_stop_keyboard(),
+    )
+  elif phase == "parse_finished":
+    total = int(payload.get("total_items") or 0)
+    await update.message.reply_text(
+      f"Парсинг Avito завершён. Всего объявлений: {total}. Готовлю Excel…",
+      reply_markup=build_stop_keyboard(),
+    )
 
 
 def format_settings_for_user(settings: dict):
@@ -397,6 +448,12 @@ async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFA
           "block_retry_wait",
           "block_give_up",
           "ui_filters_unavailable",
+          "dom_wait",
+          "dom_retry",
+          "filters_retry",
+          "filters_applied_url",
+          "page_parsed",
+          "parse_finished",
         ):
           return
         _notify(payload)
