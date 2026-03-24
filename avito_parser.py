@@ -2553,7 +2553,9 @@ def parse_avito(
         print(f"[AVITO] status_callback: {e}")
     ui_filters_temporarily_disabled = False
     dom_ready = False
-    for dom_try in range(1, AVITO_DOM_RELOAD_TRIES + 1):
+    # По требованию: DOM-перезаходы ограничиваем тремя попытками, чтобы не зависать слишком долго.
+    dom_reload_max = min(int(AVITO_DOM_RELOAD_TRIES), 3)
+    for dom_try in range(1, dom_reload_max + 1):
       blocked_dom, blocked_reason_dom = _is_avito_blocked(driver)
       if blocked_dom:
         soft_wait = float(AVITO_BLOCK_RETRY_WAIT_SEC) + random.uniform(18.0, 45.0)
@@ -2760,7 +2762,7 @@ def parse_avito(
           print(f"[AVITO] Ошибка перезахода после probe-блокировки: {e}")
         continue
       print(
-        f"[AVITO] DOM не готов (попытка {dom_try}/{AVITO_DOM_RELOAD_TRIES}): "
+        f"[AVITO] DOM не готов (попытка {dom_try}/{dom_reload_max}): "
         f"cards={'ok' if shell_ok else 'none'}, filters_panel={'ok' if filters_panel_ok else 'none'}."
       )
       if status_callback:
@@ -2770,14 +2772,21 @@ def parse_avito(
               "phase": "dom_retry",
               "page": int(page),
               "dom_try": int(dom_try),
-              "dom_try_max": int(AVITO_DOM_RELOAD_TRIES),
+                "dom_try_max": int(dom_reload_max),
               "cards_ok": bool(shell_ok),
               "filters_panel_ok": bool(filters_panel_ok),
             }
           )
         except Exception as e:
           print(f"[AVITO] status_callback: {e}")
-      if dom_try >= AVITO_DOM_RELOAD_TRIES:
+      if dom_try >= dom_reload_max:
+        break
+      # Часто сначала грузится только шапка, а карточки догружаются позже.
+      # Даем короткое дополнительное ожидание перед перезаходом.
+      _sleep_with_stop(stop_event, random.uniform(8.0, 16.0))
+      if _avito_listing_shell_present(driver):
+        print("[AVITO] После доп. ожидания контент догрузился — продолжаю без перезахода.")
+        dom_ready = True
         break
       print("[AVITO] Перезагружаю страницу и жду DOM снова…")
       try:
@@ -2791,7 +2800,7 @@ def parse_avito(
 
     if not dom_ready:
       print(
-        f"[AVITO] Не удалось получить карточки/панель фильтров после {AVITO_DOM_RELOAD_TRIES} перезаходов. "
+        f"[AVITO] Не удалось получить карточки/панель фильтров после {dom_reload_max} перезаходов. "
         "Останавливаю текущий прогон, чтобы не парсить неверную выдачу."
       )
       abort_page_loop = True
