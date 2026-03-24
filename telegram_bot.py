@@ -455,6 +455,9 @@ async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFA
         "last_block_wait_key": None,
         "last_block_detected_key": None,
         "last_filters_retry_key": None,
+        # Не спамить про блокировки/IP: не больше 5 сообщений за один запуск парсинга.
+        "block_telegram_sent": 0,
+        "block_telegram_cap": 5,
       }
 
       def _notify(payload: dict):
@@ -513,19 +516,27 @@ async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFA
             return
           status_state["last_dom_retry_page"] = page
         elif ph == "block_detected":
+          cap = int(status_state.get("block_telegram_cap") or 5)
+          if int(status_state.get("block_telegram_sent") or 0) >= cap:
+            return
           page = int(payload.get("page") or 1)
           round_no = int(payload.get("block_round") or 1)
           key = (page, round_no)
           if status_state["last_block_detected_key"] == key:
             return
           status_state["last_block_detected_key"] = key
+          status_state["block_telegram_sent"] = int(status_state.get("block_telegram_sent") or 0) + 1
         elif ph == "block_retry_wait":
+          cap = int(status_state.get("block_telegram_cap") or 5)
+          if int(status_state.get("block_telegram_sent") or 0) >= cap:
+            return
           page = int(payload.get("page") or 1)
           next_round = int(payload.get("next_round") or 2)
           key = (page, next_round)
           if status_state["last_block_wait_key"] == key:
             return
           status_state["last_block_wait_key"] = key
+          status_state["block_telegram_sent"] = int(status_state.get("block_telegram_sent") or 0) + 1
         elif ph == "filters_retry":
           page = int(payload.get("page") or 1)
           apply_try = int(payload.get("apply_try") or 1)
