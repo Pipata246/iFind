@@ -341,9 +341,10 @@ def _reset_avito_session_artifacts(driver):
     pass
 
 
-def _open_avito_with_soft_entry(driver, target_url: str, stop_event=None):
-  """Более мягкий сценарий входа: reset -> home -> city -> category -> search."""
-  _reset_avito_session_artifacts(driver)
+def _open_avito_with_soft_entry(driver, target_url: str, stop_event=None, include_home=False, reset_session=True):
+  """Мягкий вход: обычно city -> category -> search (home только при необходимости)."""
+  if reset_session:
+    _reset_avito_session_artifacts(driver)
   parsed = urlparse(target_url or "")
   city_slug = ""
   try:
@@ -353,7 +354,7 @@ def _open_avito_with_soft_entry(driver, target_url: str, stop_event=None):
   except Exception:
     city_slug = ""
 
-  steps = [AVITO_BASE_URL]
+  steps = [AVITO_BASE_URL] if include_home else []
   if city_slug:
     steps.append(f"{AVITO_BASE_URL}/{city_slug}")
     steps.append(f"{AVITO_BASE_URL}/{city_slug}/telefony/mobilnye_telefony")
@@ -382,7 +383,7 @@ def _open_avito_with_soft_entry(driver, target_url: str, stop_event=None):
         if step_try >= 2:
           raise
         print(f"[AVITO] Шаг мягкого входа не открылся ({u}) попытка {step_try}/2: {e}")
-        # Лёгкий возврат на базовую страницу перед повтором шага.
+        # Лёгкий fallback на главную только если шаг не открылся.
         try:
           driver.get(AVITO_BASE_URL)
           wait_for_document_ready(driver, step_ready_timeout, stop_event)
@@ -2376,7 +2377,7 @@ def parse_avito(
       else:
         print(f"[AVITO] Страница {page}/{max_pages}: загрузка…")
       if page == 1:
-        print("[AVITO] Мягкий вход: главная -> город -> категория -> поиск (с повторами шагов).")
+        print("[AVITO] Мягкий вход: город -> категория -> поиск (без лишнего захода на главную).")
       if status_callback:
         try:
           status_callback(
@@ -2395,8 +2396,10 @@ def parse_avito(
       for attempt in range(1, 4):
         try:
           if page == 1:
-            print("[AVITO] Мягкий вход: reset сессии -> главная -> город -> категория -> поиск.")
-            _open_avito_with_soft_entry(driver, url, stop_event=stop_event)
+            print("[AVITO] Мягкий вход: reset -> город -> категория -> поиск.")
+            _open_avito_with_soft_entry(
+              driver, url, stop_event=stop_event, include_home=False, reset_session=True
+            )
           else:
             driver.get(url)
           print(
@@ -2515,9 +2518,12 @@ def parse_avito(
           )
         except Exception as e:
           print(f"[AVITO] status_callback: {e}")
+      wait_block_sec = float(AVITO_BLOCK_RETRY_WAIT_SEC)
+      if page == 1:
+        wait_block_sec = min(wait_block_sec, 85.0)
       print(
         f"[AVITO] Попытка {block_round}/{AVITO_BLOCK_MAX_RETRIES_PER_PAGE} на странице {page}. "
-        f"Пауза {AVITO_BLOCK_RETRY_WAIT_SEC} сек (новый IP у прокси), затем снова driver.get…"
+        f"Пауза {int(wait_block_sec)} сек (новый IP у прокси), затем снова driver.get…"
       )
       if block_round >= AVITO_BLOCK_MAX_RETRIES_PER_PAGE:
         if status_callback:
@@ -2547,14 +2553,14 @@ def parse_avito(
             {
               "phase": "block_retry_wait",
               "page": int(page),
-              "wait_sec": int(AVITO_BLOCK_RETRY_WAIT_SEC),
+                "wait_sec": int(wait_block_sec),
               "next_round": int(block_round + 1),
               "block_round_max": int(AVITO_BLOCK_MAX_RETRIES_PER_PAGE),
             }
           )
         except Exception as e:
           print(f"[AVITO] status_callback: {e}")
-      _sleep_with_stop(stop_event, float(AVITO_BLOCK_RETRY_WAIT_SEC))
+      _sleep_with_stop(stop_event, wait_block_sec)
       # Дополнительный анти-спайк буфер после ротации IP.
       _sleep_with_stop(stop_event, random.uniform(8.0, 20.0))
 
@@ -2621,7 +2627,9 @@ def parse_avito(
           break
         try:
           if page == 1:
-            _open_avito_with_soft_entry(driver, url, stop_event=stop_event)
+            _open_avito_with_soft_entry(
+              driver, url, stop_event=stop_event, include_home=False, reset_session=False
+            )
           else:
             driver.get(AVITO_BASE_URL)
             if not wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT, stop_event):
@@ -2698,7 +2706,9 @@ def parse_avito(
         _sleep_with_stop(stop_event, random.uniform(8.0, 18.0))
         try:
           if page == 1:
-            _open_avito_with_soft_entry(driver, url, stop_event=stop_event)
+            _open_avito_with_soft_entry(
+              driver, url, stop_event=stop_event, include_home=False, reset_session=False
+            )
           else:
             driver.get(url)
           if not wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT, stop_event):
@@ -2775,7 +2785,9 @@ def parse_avito(
           break
         try:
           if page == 1:
-            _open_avito_with_soft_entry(driver, url, stop_event=stop_event)
+            _open_avito_with_soft_entry(
+              driver, url, stop_event=stop_event, include_home=False, reset_session=False
+            )
           else:
             driver.get(AVITO_BASE_URL)
             if not wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT, stop_event):
@@ -2868,7 +2880,9 @@ def parse_avito(
                 )
               except Exception as e:
                 print(f"[AVITO] status_callback: {e}")
-            _open_avito_with_soft_entry(driver, url, stop_event=stop_event)
+            _open_avito_with_soft_entry(
+              driver, url, stop_event=stop_event, include_home=False, reset_session=False
+            )
             if not wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT, stop_event):
               raise TimeoutException("document.readyState не достиг готовности при повторном применении фильтров")
             _sleep_with_stop(stop_event, random.uniform(1.2, 2.2))
