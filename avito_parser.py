@@ -517,10 +517,10 @@ def build_avito_search_url(keyword, model, city, price_min, price_max, page=1, f
   if city_slug:
     base = f"{AVITO_BASE_URL}/{city_slug}"
 
-  # Для iPhone-потока используем безопасный категорийный URL без попытки угадывать цветовой path-slug,
-  # т.к. Avito часто использует внутренние кодированные сегменты и может отдавать 404.
+  # Для iPhone-потока — только раздел «мобильные телефоны» в городе. Сегмент /apple в пути на выдаче
+  # часто отдаёт 404 (бренд задаётся фильтрами f=…, а не отдельной «папкой» в URL).
   if is_iphone_flow:
-    path = f"{base}/telefony/mobilnye_telefony/apple"
+    path = f"{base}/telefony/mobilnye_telefony"
     params = []
     q_parts = []
     if keyword:
