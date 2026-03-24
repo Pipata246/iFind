@@ -1852,6 +1852,20 @@ def _url_has_expected_color_path(url: str, colors) -> bool:
   return False
 
 
+def _color_filter_accepted(url: str, filters, ui_applied) -> bool:
+  """Цвет: slug в path (как у ручной ссылки) ИЛИ реально выбран в UI (часто цвет только в f=, без /zelenyy/)."""
+  colors = (filters or {}).get("colors") or []
+  if not colors:
+    return True
+  if _url_has_expected_color_path(url, colors):
+    return True
+  n_req = len([c for c in colors if str(c).strip()])
+  if not n_req:
+    return True
+  n_ap = int((ui_applied or {}).get("colors") or 0)
+  return n_ap >= n_req
+
+
 def _has_meaningful_avito_ui_filters(filters):
   """Есть ли смысловые фильтры в интерфейсе (не только значения по умолчанию)."""
   if not filters:
@@ -2981,9 +2995,23 @@ def parse_avito(
                 )
               except Exception as e:
                 print(f"[AVITO] status_callback: {e}")
-            _open_avito_with_soft_entry(
-              driver, url, stop_event=stop_event, include_home=False, reset_session=False
+            # Нельзя открывать seed url без f=: сбросит выдачу. Берём URL после прошлой попытки.
+            reload_target = (
+              last_url
+              if (last_url and _has_filter_signature(last_url))
+              else _ensure_price_bounds_in_url(url, price_min, price_max)
             )
+            if reload_target != url:
+              print(
+                f"[AVITO] Повтор: перезаход по URL с параметром f= (не по начальному seed), "
+                f"{len(reload_target)} симв."
+              )
+            try:
+              driver.get(reload_target)
+            except Exception:
+              _open_avito_with_soft_entry(
+                driver, reload_target, stop_event=stop_event, include_home=False, reset_session=False
+              )
             if not wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT, stop_event):
               raise TimeoutException("document.readyState не достиг готовности при повторном применении фильтров")
             _sleep_with_stop(stop_event, random.uniform(1.2, 2.2))
@@ -2997,16 +3025,20 @@ def parse_avito(
           )
           has_filter_signature = _has_filter_signature(current_after_filters)
           has_price_signature = _url_has_expected_price_bounds(current_after_filters, price_min, price_max)
-          has_color_path_signature = _url_has_expected_color_path(current_after_filters, (filters or {}).get("colors"))
+          has_color_ok = _color_filter_accepted(current_after_filters, filters, ui_applied)
+          has_color_in_path = _url_has_expected_color_path(
+            current_after_filters, (filters or {}).get("colors")
+          )
           print(
             f"[AVITO] Проверка URL после фильтров (попытка {apply_try}): "
             f"has_f={has_filter_signature}, has_price={has_price_signature}, "
-            f"has_color_path={has_color_path_signature}, ui_sum={raw_ui_sum}, url={current_after_filters[:320]}"
+            f"has_color_ok={has_color_ok} (path_slug={has_color_in_path}), ui_sum={raw_ui_sum}, "
+            f"url={current_after_filters[:320]}"
           )
           if not meaningful:
             apply_ok = True
             break
-          if has_filter_signature and has_price_signature and has_color_path_signature:
+          if has_filter_signature and has_price_signature and has_color_ok:
             if status_callback:
               try:
                 status_callback(
