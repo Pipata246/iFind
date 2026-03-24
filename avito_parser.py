@@ -483,6 +483,26 @@ def _looks_like_avito_home_or_service_page(driver) -> bool:
     return False
 
 
+def _looks_like_avito_not_found_page(driver) -> bool:
+  """Явная 404-страница Avito: 'Такой страницы не существует'."""
+  try:
+    return bool(
+      driver.execute_script(
+        """
+        var t = (document.title || '').toLowerCase();
+        var b = ((document.body && document.body.innerText) || '').toLowerCase();
+        return (
+          b.indexOf('такой страницы не существует') !== -1 ||
+          b.indexOf('one of two') !== -1 ||
+          t.indexOf('страница не существует') !== -1
+        );
+        """
+      )
+    )
+  except Exception:
+    return False
+
+
 def _log_avito_empty_page_probe(driver):
   """Если выдачи нет в DOM — короткий срез текста/заголовка (капча, пустая страница, антибот)."""
   try:
@@ -516,9 +536,6 @@ def _wait_for_avito_listing_shell(driver, timeout_sec=45, stop_event=None):
 
 def build_avito_search_url(keyword, model, city, price_min, price_max, page=1, filters=None):
   filters = filters or {}
-  color_values = filters.get("colors") or []
-  first_color = str(color_values[0]).strip() if color_values else ""
-
   kw = (keyword or "").strip().lower()
   mdl = (model or "").strip().lower()
   is_iphone_flow = ("iphone" in kw) or ("iphone" in mdl) or ("apple" in kw)
@@ -527,19 +544,18 @@ def build_avito_search_url(keyword, model, city, price_min, price_max, page=1, f
   if city_slug:
     base = f"{AVITO_BASE_URL}/{city_slug}"
 
-  # Для iPhone-потока сразу в категорийный URL, чтобы страница была "фильтруемая" по UI.
+  # Для iPhone-потока используем безопасный категорийный URL без попытки угадывать цветовой path-slug,
+  # т.к. Avito часто использует внутренние кодированные сегменты и может отдавать 404.
   if is_iphone_flow:
-    model_raw = (model or "").strip()
-    if not model_raw:
-      model_raw = "iphone"
-    model_slug = _latin_slug(model_raw)
-    if "iphone" not in model_slug:
-      model_slug = f"iphone_{model_slug}" if model_slug else "iphone"
-    color_slug = _color_to_path_slug(first_color) if first_color else ""
-    path = f"{base}/telefony/mobilnye_telefony/apple/{model_slug}"
-    if color_slug:
-      path = f"{path}/{color_slug}"
+    path = f"{base}/telefony/mobilnye_telefony/apple"
     params = []
+    q_parts = []
+    if keyword:
+      q_parts.append(keyword)
+    if model:
+      q_parts.append(model)
+    if q_parts:
+      params.append(f"q={'+'.join(q_parts)}")
     if price_min is not None:
       params.append(f"pmin={price_min}")
     if price_max is not None:
@@ -2426,6 +2442,17 @@ def parse_avito(
         break
 
       print("[AVITO] Проверка страницы на ограничение доступа…")
+      if _looks_like_avito_not_found_page(driver):
+        print("[AVITO] Открылась 404-страница Avito (битая ссылка). Перехожу на безопасный URL поиска…")
+        safe_url = build_avito_search_url(keyword, model, city, price_min, price_max, page=page, filters={})
+        try:
+          driver.get(safe_url)
+          if not wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT, stop_event):
+            print("[AVITO] После перехода на безопасный URL document.readyState не готов.")
+          _sleep_with_stop(stop_event, random.uniform(2.0, 4.0))
+          url = safe_url
+        except Exception as e:
+          print(f"[AVITO] Ошибка перехода на безопасный URL: {e}")
       blocked, reason = _is_avito_blocked(driver)
       if not blocked:
         t_fail, t_reason = _detect_avito_transport_issue(driver)
