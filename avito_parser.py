@@ -2808,34 +2808,36 @@ def parse_avito(
       for attempt in range(1, 4):
         try:
           if page == 1:
-            # Сначала один спокойный прямой GET (без сброса cookies и без цепочки из 3 URL) —
-            # так реже триггерится антибот, чем «город→категория→выдача» с пустой сессией.
             br = int(block_round)
             if attempt == 1 and br > 1:
               print(
-                "[AVITO] После ожидания смены IP: прямой переход на выдачу (без цепочки шагов)…"
+                "[AVITO] После ожидания смены IP: вход на выдачу через главную (без цепочки шагов)…"
               )
               _sleep_with_stop(stop_event, random.uniform(3.0, 8.0))
-              driver.get(url)
+              _open_avito_with_soft_entry(
+                driver, url, stop_event=stop_event, include_home=True, reset_session=False
+              )
             elif attempt == 1:
               print(
-                "[AVITO] Вход на выдачу: прямой переход по URL (без сброса cookies, один запрос)…"
+                "[AVITO] Вход на выдачу: обязательно сначала главная (без сброса cookies)…"
               )
               _sleep_with_stop(stop_event, random.uniform(6.0, 14.0))
-              driver.get(url)
+              _open_avito_with_soft_entry(
+                driver, url, stop_event=stop_event, include_home=True, reset_session=False
+              )
             elif attempt == 2:
               print(
-                "[AVITO] Повтор загрузки: мягкая цепочка город→категория→выдача, без сброса cookies…"
+                "[AVITO] Повтор загрузки: мягкий вход через главную, без сброса cookies…"
               )
               _sleep_with_stop(stop_event, random.uniform(2.5, 6.0))
               _open_avito_with_soft_entry(
-                driver, url, stop_event=stop_event, include_home=False, reset_session=False
+                driver, url, stop_event=stop_event, include_home=True, reset_session=False
               )
             else:
-              print("[AVITO] Последняя попытка: мягкий вход со сбросом сессии (как новый визит)…")
+              print("[AVITO] Последняя попытка: мягкий вход через главную со сбросом сессии…")
               _sleep_with_stop(stop_event, random.uniform(3.0, 7.0))
               _open_avito_with_soft_entry(
-                driver, url, stop_event=stop_event, include_home=False, reset_session=True
+                driver, url, stop_event=stop_event, include_home=True, reset_session=True
               )
           else:
             if prefer_ui_pagination and _try_click_avito_pagination_page(driver, page, stop_event):
@@ -3069,7 +3071,7 @@ def parse_avito(
         try:
           if page == 1:
             _open_avito_with_soft_entry(
-              driver, url, stop_event=stop_event, include_home=False, reset_session=False
+              driver, url, stop_event=stop_event, include_home=True, reset_session=False
             )
           else:
             driver.get(AVITO_BASE_URL)
@@ -3148,7 +3150,7 @@ def parse_avito(
         try:
           if page == 1:
             _open_avito_with_soft_entry(
-              driver, url, stop_event=stop_event, include_home=False, reset_session=False
+              driver, url, stop_event=stop_event, include_home=True, reset_session=False
             )
           else:
             driver.get(url)
