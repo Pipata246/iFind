@@ -3321,23 +3321,9 @@ def parse_avito(
       for attempt in range(1, 4):
         try:
           if page == 1:
-            br = int(block_round)
-            if attempt == 1:
-              print("[AVITO] Вход на выдачу: прямой переход на целевой URL…")
-              _sleep_with_stop(stop_event, random.uniform(1.0, 2.5))
-              driver.get(url)
-            elif attempt == 2:
-              print("[AVITO] Повтор загрузки: мягкий вход без главной…")
-              _sleep_with_stop(stop_event, random.uniform(1.5, 3.5))
-              _open_avito_with_soft_entry(
-                driver, url, stop_event=stop_event, include_home=False, reset_session=(br > 1)
-              )
-            else:
-              print("[AVITO] Последняя попытка: мягкий вход без главной (со сбросом сессии)…")
-              _sleep_with_stop(stop_event, random.uniform(2.0, 5.0))
-              _open_avito_with_soft_entry(
-                driver, url, stop_event=stop_event, include_home=False, reset_session=True
-              )
+            print("[AVITO] Вход на выдачу: только прямой переход на целевой URL…")
+            _sleep_with_stop(stop_event, random.uniform(1.0, 2.0))
+            driver.get(url)
           else:
             if prefer_ui_pagination and _try_click_avito_pagination_page(driver, page, stop_event):
               print(
@@ -3580,9 +3566,7 @@ def parse_avito(
           break
         try:
           if page == 1:
-            _open_avito_with_soft_entry(
-              driver, url, stop_event=stop_event, include_home=False, reset_session=True
-            )
+            driver.get(url)
           else:
             driver.get(url)
           if not wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT, stop_event):
@@ -3655,9 +3639,7 @@ def parse_avito(
         _sleep_with_stop(stop_event, random.uniform(8.0, 18.0))
         try:
           if page == 1:
-            _open_avito_with_soft_entry(
-              driver, url, stop_event=stop_event, include_home=False, reset_session=False
-            )
+            driver.get(url)
           else:
             driver.get(url)
           if not wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT, stop_event):
@@ -3734,14 +3716,8 @@ def parse_avito(
           break
         try:
           if page == 1:
-            _open_avito_with_soft_entry(
-              driver, url, stop_event=stop_event, include_home=False, reset_session=False
-            )
+            driver.get(url)
           else:
-            driver.get(AVITO_BASE_URL)
-            if not wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT, stop_event):
-              print("[AVITO] Домашняя страница Avito не успела прогрузиться после probe-блокировки.")
-            _sleep_with_stop(stop_event, random.uniform(2.0, 4.5))
             driver.get(url)
           if not wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT, stop_event):
             print("[AVITO] После перезахода после probe document.readyState не готов — пробую дальше.")
