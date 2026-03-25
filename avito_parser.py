@@ -87,14 +87,16 @@ def _filters_to_excel_meta(filters, *, applied_mode: str = "", ui_applied_note: 
   filters = filters or {}
   return {
     "avito_filter_memory": ", ".join(filters.get("memory", [])),
-    "avito_filter_seller_type": (filters.get("seller_type") or "private"),
+    "avito_filter_colors": ", ".join(filters.get("colors", [])),
+    "avito_filter_seller_type": (filters.get("seller_type") or "all"),
+    "avito_filter_rating_4_plus": "yes" if filters.get("rating_4_plus") else "no",
     "avito_filter_applied_mode": applied_mode or "",
     "avito_ui_applied_note": ui_applied_note or "",
   }
 
 
 def _item_search_blob(item: dict) -> str:
-  parts = [item.get("title") or "", item.get("url") or "", item.get("seller_text") or ""]
+  parts = [item.get("title") or "", item.get("description") or "", item.get("url") or "", item.get("seller_text") or ""]
   return " ".join(parts).lower()
 
 
@@ -136,26 +138,31 @@ def _text_matches_sim(blob: str, values) -> bool:
 
 
 def _text_matches_color(blob: str, values) -> bool:
-  b = blob.lower()
+  b = (blob or "").lower().replace("ё", "е")
+  b_compact = re.sub(r"[^a-zа-я0-9]+", "", b)
+  color_groups = {
+    "blue": ["синий", "син", "blue", "blu", "siniy", "sinij", "ciniy", "golub", "голуб", "deepblue", "pacificblue"],
+    "black": ["черный", "черн", "black", "blk", "cherniy", "chernyi", "grafit", "graphite"],
+    "white": ["белый", "бел", "white", "silver", "серебрист", "serebro", "starlight"],
+    "green": ["зеленый", "зелен", "green", "grn", "zelen", "mint", "teal"],
+    "red": ["красный", "красн", "red", "korall", "coral", "burgundy"],
+    "gold": ["золот", "gold", "desert", "champagne", "песоч", "titandesert"],
+    "purple": ["фиолет", "purple", "violet", "lilac", "lavender"],
+    "gray": ["серый", "сер", "gray", "grey", "spacegray", "spaceblack", "titanium"],
+    "pink": ["розов", "pink", "rose"],
+    "yellow": ["желт", "yellow"],
+  }
   for v in values or []:
-    raw = (v or "").strip().lower()
+    raw = (v or "").strip().lower().replace("ё", "е")
     if not raw:
       continue
-    if raw in b:
+    raw_compact = re.sub(r"[^a-zа-я0-9]+", "", raw)
+    if raw in b or (raw_compact and raw_compact in b_compact):
       return True
-    r2 = raw.replace("ё", "е")
-    if r2 in b.replace("ё", "е"):
-      return True
-    if "зел" in raw and ("зел" in b or "green" in b):
-      return True
-    if "красн" in raw and "красн" in b:
-      return True
-    if "син" in raw and "син" in b:
-      return True
-    if "бел" in raw and ("бел" in b or "white" in b):
-      return True
-    if "черн" in raw and ("черн" in b or "black" in b):
-      return True
+    for aliases in color_groups.values():
+      if any(a in raw or a in raw_compact for a in aliases):
+        if any(a in b or a in b_compact for a in aliases):
+          return True
   return False
 
 
@@ -3013,6 +3020,25 @@ def _extract_card_seller_text_selenium(card):
   return ""
 
 
+def _extract_card_rating_text_selenium(card):
+  """Рейтинг продавца (если показан в карточке выдачи)."""
+  selectors = [
+    "[data-marker*='rating']",
+    "[class*='rating']",
+    "[class*='stars']",
+  ]
+  for sel in selectors:
+    try:
+      els = card.find_elements(By.CSS_SELECTOR, sel)
+      for el in els[:6]:
+        t = (el.text or "").strip()
+        if t and re.search(r"\b[1-5][\.,]?\d?\b", t):
+          return t
+    except Exception:
+      continue
+  return ""
+
+
 def _is_private_seller_text(seller_text: str) -> bool:
   s = (seller_text or "").strip().lower()
   if not s:
@@ -3021,6 +3047,20 @@ def _is_private_seller_text(seller_text: str) -> bool:
     return False
   # Для частников обычно есть человеческое имя.
   return bool(re.search(r"[a-zа-я]{2,}", s, re.I))
+
+
+def _extract_rating_value(text: str) -> float | None:
+  s = (text or "").replace(",", ".")
+  m = re.search(r"\b([1-5](?:\.\d)?)\b", s)
+  if not m:
+    return None
+  try:
+    v = float(m.group(1))
+  except Exception:
+    return None
+  if 0.0 <= v <= 5.0:
+    return v
+  return None
 
 
 def _is_avito_today_text(text):
@@ -3063,6 +3103,9 @@ def _parse_cards_from_html(driver):
     city_text = ""
     date_text = ""
     seller_text = ""
+    description_text = ""
+    rating_text = ""
+    rating_value = None
     if container is not None:
       price_tag = container.select_one(
         "[data-marker='item-price'] [data-marker='item-price-value'], "
@@ -3079,6 +3122,11 @@ def _parse_cards_from_html(driver):
       date_text = (date_tag.get_text(" ", strip=True) if date_tag else "") or ""
       seller_tag = container.select_one("[data-marker*='seller'], [class*='seller'], [class*='iva-seller']")
       seller_text = (seller_tag.get_text(" ", strip=True) if seller_tag else "") or ""
+      description_tag = container.select_one("[data-marker='item-description'], [class*='item-description'], [class*='iva-item-text']")
+      description_text = (description_tag.get_text(" ", strip=True) if description_tag else "") or ""
+      rating_tag = container.select_one("[data-marker*='rating'], [class*='rating'], [class*='stars']")
+      rating_text = (rating_tag.get_text(" ", strip=True) if rating_tag else "") or ""
+      rating_value = _extract_rating_value(rating_text)
 
     items.append(
       {
@@ -3088,8 +3136,11 @@ def _parse_cards_from_html(driver):
         "url": href,
         "city": city_text or None,
         "date_text": date_text or None,
+        "description": description_text or None,
         "seller_text": seller_text or None,
         "is_private_seller": bool(_is_private_seller_text(seller_text)),
+        "rating_text": rating_text or None,
+        "seller_rating": rating_value,
       }
     )
     seen_urls.add(href)
@@ -3138,6 +3189,17 @@ def _parse_cards_to_items(cards, city, price_min, price_max):
 
       date_text = _extract_card_date_text_selenium(card)
       seller_text = _extract_card_seller_text_selenium(card)
+      description_text = ""
+      try:
+        desc_el = card.find_element(
+          By.CSS_SELECTOR,
+          "[data-marker='item-description'], [class*='item-description'], [class*='iva-item-text']",
+        )
+        description_text = (desc_el.text or "").strip()
+      except Exception:
+        pass
+      rating_text = _extract_card_rating_text_selenium(card)
+      rating_value = _extract_rating_value(rating_text)
 
       # Фильтр по городу делаем на уровне URL (/samara/...), а не по тексту карточки.
       # В карточках город может быть указан как район/пригород и давать ложные отсеивания.
@@ -3155,8 +3217,11 @@ def _parse_cards_to_items(cards, city, price_min, price_max):
         "url": href,
         "city": city_text or None,
         "date_text": date_text or None,
+        "description": description_text or None,
         "seller_text": seller_text or None,
         "is_private_seller": bool(_is_private_seller_text(seller_text)),
+        "rating_text": rating_text or None,
+        "seller_rating": rating_value,
       })
       stats["parsed_ok"] += 1
     except Exception:
@@ -3979,11 +4044,32 @@ def parse_avito(
       unique_items = [it for it in unique_items if _matches_memory_from_listing(it, filters.get("memory"))]
       if before != len(unique_items):
         print(f"[AVITO] Фильтр памяти (выдача): отфильтровано {before - len(unique_items)} объявлений.")
-    if str(filters.get("seller_type") or "private").lower() == "private":
+    if filters.get("colors"):
+      before = len(unique_items)
+      unique_items = [it for it in unique_items if _text_matches_color(_item_search_blob(it), filters.get("colors"))]
+      if before != len(unique_items):
+        print(f"[AVITO] Фильтр цвета (описание/заголовок): отфильтровано {before - len(unique_items)} объявлений.")
+    seller_mode = str(filters.get("seller_type") or "all").lower()
+    if seller_mode == "private":
       before = len(unique_items)
       unique_items = [it for it in unique_items if bool(it.get("is_private_seller"))]
       if before != len(unique_items):
         print(f"[AVITO] Фильтр «только частные»: отфильтровано {before - len(unique_items)} объявлений.")
+    elif seller_mode == "company":
+      before = len(unique_items)
+      unique_items = [it for it in unique_items if not bool(it.get("is_private_seller"))]
+      if before != len(unique_items):
+        print(f"[AVITO] Фильтр «только компании»: отфильтровано {before - len(unique_items)} объявлений.")
+
+    if bool(filters.get("rating_4_plus")):
+      before = len(unique_items)
+      unique_items = [
+        it
+        for it in unique_items
+        if (it.get("seller_rating") is not None and float(it.get("seller_rating")) >= 4.0)
+      ]
+      if before != len(unique_items):
+        print(f"[AVITO] Фильтр рейтинга 4+: отфильтровано {before - len(unique_items)} объявлений.")
 
     all_items.extend(_enrich_items_with_filter_meta(unique_items, filter_meta))
     if checkpoint_callback:
@@ -4021,7 +4107,7 @@ def parse_avito(
       _sleep_with_stop(stop_event, delay)
 
   text_fallback_ran = False
-  mode, mode_note = ("fast_listing", "Отбор по выдаче: price + memory + today_only + private seller")
+  mode, mode_note = ("fast_listing", "Отбор по выдаче: price + memory + colors + today_only + seller + rating")
   final_meta = _filters_to_excel_meta(filters, applied_mode=mode, ui_applied_note=mode_note)
   for item in all_items:
     item.update(final_meta)

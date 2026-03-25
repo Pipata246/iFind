@@ -32,10 +32,7 @@ create table if not exists public.bot_settings (
   price_max integer,
 
   memory text[] default '{}',
-  ram text[] default '{}',
-  sim text[] default '{}',
   colors text[] default '{}',
-  condition text[] default '{}',
 
   seller_type text default 'all',
   rating_4_plus boolean default false,
@@ -70,10 +67,7 @@ create table if not exists public.bot_manual_settings (
   price_max integer,
 
   memory text[] default '{}',
-  ram text[] default '{}',
-  sim text[] default '{}',
   colors text[] default '{}',
-  condition text[] default '{}',
 
   seller_type text default 'all',
   rating_4_plus boolean default false,
@@ -123,3 +117,20 @@ with check (true);
 
 -- Миграция: если раньше добавляли wb_today_only — удалить (не используется):
 -- alter table public.bot_settings drop column if exists wb_today_only;
+
+-- ==================================
+-- Миграция для уже существующей БД:
+-- удалить лишние поля из старой схемы
+-- ==================================
+-- begin;
+-- alter table public.bot_settings
+--   drop column if exists ram,
+--   drop column if exists sim,
+--   drop column if exists condition,
+--   drop column if exists wb_today_only;
+--
+-- alter table public.bot_manual_settings
+--   drop column if exists ram,
+--   drop column if exists sim,
+--   drop column if exists condition;
+-- commit;
