@@ -999,18 +999,25 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["stop_notified"] = True
     mid = context.user_data.pop("avito_parse_start_msg_id", None)
     cid = update.effective_chat.id
+    stop_text = "⛔ Парсинг остановлен."
     if mid is not None:
       try:
         await context.bot.edit_message_text(
           chat_id=cid,
           message_id=mid,
-          text="\u200b",
+          text=stop_text,
           reply_markup=build_main_keyboard(),
         )
       except Exception:
-        await update.message.reply_text("\u200b", reply_markup=build_main_keyboard())
+        try:
+          await update.message.reply_text(stop_text, reply_markup=build_main_keyboard())
+        except Exception:
+          pass
     else:
-      await update.message.reply_text("\u200b", reply_markup=build_main_keyboard())
+      try:
+        await update.message.reply_text(stop_text, reply_markup=build_main_keyboard())
+      except Exception:
+        pass
     return
 
   # Выбор «только сегодня / все» → колонка today_only в bot_manual_settings, затем парсинг по этой таблице
