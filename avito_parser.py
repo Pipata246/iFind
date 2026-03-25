@@ -355,6 +355,70 @@ def _reset_avito_session_artifacts(driver):
     pass
 
 
+def _try_accept_avito_consent(driver) -> bool:
+  """Пытаемся принять cookie/consent баннер (если он всплывает на главной/поиске).
+
+  Возвращает True если клик вероятно выполнен.
+  """
+  try:
+    # Ставим short implicit wait, чтобы find/click не зависали.
+    try:
+      driver.implicitly_wait(0)
+    except Exception:
+      pass
+
+    return bool(
+      driver.execute_script(
+        r"""
+        try {
+          var texts = [
+            'принять', 'принять все', 'согласен', 'согласиться', 'согласие',
+            'разрешить', 'разрешить все', 'ok', 'оk', 'ок', 'понял', 'понятно', 'продолжить',
+            'cookies', 'cookie', 'cоглас', 'согласитесь'
+          ];
+          function norm(s){ return (s||'').toString().toLowerCase().replace(/\s+/g,' ').trim(); }
+          function visible(el){
+            if(!el || !el.getBoundingClientRect) return false;
+            var r = el.getBoundingClientRect();
+            if (r.width < 50 || r.height < 20) return false;
+            if (el.offsetParent === null) return false;
+            var st = window.getComputedStyle(el);
+            if (st && (st.display==='none' || st.visibility==='hidden' || st.opacity==='0')) return false;
+            return true;
+          }
+          var nodes = document.querySelectorAll('button, a, [role="button"], span, div');
+          for (var i=0;i<nodes.length;i++){
+            var el = nodes[i];
+            if (!visible(el)) continue;
+            var t = norm(el.innerText || el.textContent || el.getAttribute('aria-label') || '');
+            if (!t) continue;
+            // Делаем матчи более безопасными: только если есть явные ключи согласия.
+            var hasConsent = false;
+            var hasAnyText = false;
+            for (var j=0;j<texts.length;j++){
+              if (!texts[j]) continue;
+              if (t.indexOf(texts[j]) !== -1) { hasAnyText = true; }
+              if (texts[j] === 'принять' && t.indexOf('принять') !== -1) hasConsent = true;
+              if (texts[j] === 'согласен' && t.indexOf('соглас') !== -1) hasConsent = true;
+              if (texts[j] === 'ок' && (t === 'ок' || t.indexOf('ок') !== -1)) hasConsent = true;
+              if (texts[j] === 'понятно' && t.indexOf('понятно') !== -1) hasConsent = true;
+              if (texts[j] === 'разрешить' && t.indexOf('разреш') !== -1) hasConsent = true;
+            }
+            // Если есть только "cookies" без кнопки согласия — не трогаем.
+            if (!hasConsent) continue;
+            if (!hasAnyText) continue;
+            try { el.scrollIntoView({block:'center', inline:'nearest'}); } catch(e1){}
+            try { el.click(); return true; } catch(e2){}
+          }
+          return false;
+        } catch (e) { return false; }
+        """
+      )
+    )
+  except Exception:
+    return False
+
+
 def _open_avito_with_soft_entry(driver, target_url: str, stop_event=None, include_home=False, reset_session=True):
   """Мягкий вход: обычно city -> category -> search (home только при необходимости)."""
   if reset_session and include_home:
@@ -397,25 +461,49 @@ def _open_avito_with_soft_entry(driver, target_url: str, stop_event=None, includ
   for idx, u in enumerate(ordered_steps):
     opened = False
     # Каждый шаг входа пробуем ограниченно, чтобы не зависать на одном URL.
-    for step_try in range(1, 3):
+    # Главную Avito пробуем более агрессивно: она чаще всего ловит ECONNRESET/anti-bot.
+    is_home_step = include_home and (u.rstrip("/") == (AVITO_BASE_URL or "").rstrip("/"))
+    max_step_tries = 5 if is_home_step else 2
+    for step_try in range(1, max_step_tries + 1):
       try:
         _sleep_with_stop(stop_event, random.uniform(0.25, 0.95))
         driver.get(u)
         if not wait_for_document_ready(driver, step_ready_timeout, stop_event):
           raise TimeoutException("document.readyState не достиг готовности")
+
+        # Если открылся home — часто есть cookie/consent баннер, он мешает дальнейшим кликам.
+        if is_home_step:
+          _try_accept_avito_consent(driver)
+          sleep(0.6)
+
+        # Если попали в блокировку/проверку — пробуем ещё раз (раньше это приводило к дальнейшему fallthrough).
+        blocked, _reason = _is_avito_blocked(driver)
+        if blocked:
+          raise RuntimeError(f"Avito blocked after step open: {_reason or 'blocked'}")
+
         opened = True
         break
       except Exception as e:
-        if step_try >= 2:
+        if step_try >= max_step_tries:
           raise
-        print(f"[AVITO] Шаг мягкого входа не открылся ({u}) попытка {step_try}/2: {e}")
-        # Лёгкий fallback на главную только если шаг не открылся.
+
+        print(
+          f"[AVITO] Шаг мягкого входа не открылся ({u}) попытка {step_try}/{max_step_tries}: {e}"
+        )
+        # Лёгкий fallback: если шаг (не home) упал — возвращаемся на главную и пробуем снова.
+        # Это полезно, когда SPA/сервер отдаёт разные редиректы.
         try:
-          driver.get(AVITO_BASE_URL)
-          wait_for_document_ready(driver, step_ready_timeout, stop_event)
+          if not is_home_step:
+            driver.get(AVITO_BASE_URL)
+            wait_for_document_ready(driver, step_ready_timeout, stop_event)
+            if include_home:
+              _try_accept_avito_consent(driver)
+              sleep(0.6)
         except Exception:
           pass
-        _sleep_with_stop(stop_event, random.uniform(1.5, 3.5))
+
+        # Подождём перед повтором: при ECONNRESET бывает "вторая попытка" успешнее.
+        _sleep_with_stop(stop_event, random.uniform(3.0, 7.0))
 
     if not opened:
       raise TimeoutException(f"Не удалось открыть шаг мягкого входа: {u}")

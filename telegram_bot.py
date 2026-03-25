@@ -118,6 +118,18 @@ def parse_csv_list(text: str):
   return [p for p in parts if p]
 
 
+def _is_stop_parsing_command(text: str) -> bool:
+  """Распознаем команду стопа устойчиво (с/без emoji, лишние пробелы)."""
+  t = (text or "").strip().lower()
+  if not t:
+    return False
+  if t == BTN_STOP_PARSING.lower():
+    return True
+  # Иногда Telegram-кнопка может прийти с другим emoji/вариацией.
+  compact = re.sub(r"\s+", " ", t)
+  return "останов" in compact and "парсинг" in compact
+
+
 def normalize_capacity_values(values):
   """Normalize values like 128, 128gb, 128 ГБ into '128 ГБ'."""
   out = []
@@ -833,7 +845,11 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
   # Остановка текущего парсинга (если идет)
   active_parse = context.user_data.get("active_parse")
-  if active_parse and user_text == BTN_STOP_PARSING:
+  if _is_stop_parsing_command(user_text):
+    if not active_parse:
+      # Не уводим в общий fallback «Используйте кнопки внизу.»
+      await update.message.reply_text("Остановка уже выполняется или парсинг не запущен.", reply_markup=build_main_keyboard())
+      return
     stop_event = active_parse.get("stop_event")
     if stop_event is not None:
       stop_event.set()
