@@ -3323,33 +3323,19 @@ def parse_avito(
         try:
           if page == 1:
             br = int(block_round)
-            if attempt == 1 and br > 1:
-              print(
-                "[AVITO] После ожидания смены IP: вход на выдачу через главную (без цепочки шагов)…"
-              )
-              _sleep_with_stop(stop_event, random.uniform(3.0, 8.0))
-              _open_avito_with_soft_entry(
-                driver, url, stop_event=stop_event, include_home=True, reset_session=True
-              )
-            elif attempt == 1:
-              print(
-                "[AVITO] Вход на выдачу: обязательно сначала главная (без сброса cookies)…"
-              )
-              _sleep_with_stop(stop_event, random.uniform(6.0, 14.0))
-              _open_avito_with_soft_entry(
-                driver, url, stop_event=stop_event, include_home=True, reset_session=False
-              )
+            if attempt == 1:
+              print("[AVITO] Вход на выдачу: прямой переход на целевой URL…")
+              _sleep_with_stop(stop_event, random.uniform(1.0, 2.5))
+              driver.get(url)
             elif attempt == 2:
-              print(
-                "[AVITO] Повтор загрузки: мягкий вход через главную, без сброса cookies…"
-              )
-              _sleep_with_stop(stop_event, random.uniform(2.5, 6.0))
+              print("[AVITO] Повтор загрузки: мягкий вход без главной…")
+              _sleep_with_stop(stop_event, random.uniform(1.5, 3.5))
               _open_avito_with_soft_entry(
-                driver, url, stop_event=stop_event, include_home=True, reset_session=(br > 1)
+                driver, url, stop_event=stop_event, include_home=False, reset_session=(br > 1)
               )
             else:
               print("[AVITO] Последняя попытка: мягкий вход через главную со сбросом сессии…")
-              _sleep_with_stop(stop_event, random.uniform(3.0, 7.0))
+              _sleep_with_stop(stop_event, random.uniform(2.0, 5.0))
               _open_avito_with_soft_entry(
                 driver, url, stop_event=stop_event, include_home=True, reset_session=True
               )
