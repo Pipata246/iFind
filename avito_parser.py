@@ -983,7 +983,9 @@ def _js_click_filter_option(driver, raw_text: str, mode: str) -> bool:
           roots.forEach(function(root){
             root.querySelectorAll('label, li, div[role], span, button, a, p, div').forEach(function(el){
               if (strictColumn !== false && !inFilterColumn(el)) return;
-              var t = norm(el.innerText || el.textContent || '');
+              // У Avito цвет/чипы часто визуальные (текст может отсутствовать),
+              // но подпись бывает в aria-label/title.
+              var t = norm(el.innerText || el.textContent || el.getAttribute('aria-label') || el.getAttribute('title') || '');
               if (!t || t.length > 140) return;
               out.push({el: el, t: t});
             });
@@ -996,7 +998,9 @@ def _js_click_filter_option(driver, raw_text: str, mode: str) -> bool:
           var asOnly = document.querySelector('aside');
           if (asOnly) {
             asOnly.querySelectorAll('label, span, button, div, a').forEach(function(el){
-              var t = norm(el.innerText || el.textContent || '');
+              // У Avito цвет/чипы часто визуальные (текст может отсутствовать),
+              // но подпись бывает в aria-label/title.
+              var t = norm(el.innerText || el.textContent || el.getAttribute('aria-label') || el.getAttribute('title') || '');
               if (t && t.length < 140) nodes.push({el: el, t: t});
             });
           }
@@ -1038,7 +1042,8 @@ def _js_click_filter_option(driver, raw_text: str, mode: str) -> bool:
         if (mode === 'color') {
           for (var c = 0; c < nodes.length; c++) {
             var tc = nodes[c].t;
-            if (tc.indexOf(needle) !== -1 && tc.length < 56) {
+            // Иногда aria-label содержит доп. сведения (не только сам цвет).
+            if (tc.indexOf(needle) !== -1 && tc.length < 90) {
               if (clickSmart(nodes[c].el)) return true;
             }
           }
@@ -1888,8 +1893,10 @@ def _wait_for_avito_filters_panel(driver, timeout_sec=45, stop_event=None):
         if (rc && rc.getBoundingClientRect().height > 80) return true;
         // Текстовые маркеры левой колонки (бывают без стабильных data-marker/class).
         var txt = ((document.body && document.body.innerText) || '').toLowerCase();
-        if (txt.indexOf('память') !== -1 && txt.indexOf('sim-карты') !== -1) return true;
-        if (txt.indexOf('оперативная память') !== -1 && txt.indexOf('показать ещё') !== -1) return true;
+        // Некоторые вёрстки не содержат точную строку "SIM-карты" / "показать ещё"
+        // (возможны пробелы, разные тире и ё/е), поэтому делаем детект мягче.
+        if (txt.indexOf('память') !== -1 && (txt.indexOf('sim') !== -1 || txt.indexOf('сим') !== -1)) return true;
+        if (txt.indexOf('оперативная память') !== -1 && (txt.indexOf('показать ещё') !== -1 || txt.indexOf('показать еще') !== -1)) return true;
         return false;
         """
       )
@@ -2395,11 +2402,16 @@ def _apply_avito_ui_filters(driver, filters, stop_event=None):
   )
 
   print("[AVITO] Жду появления колонки/блока фильтров в DOM (до 45 с)…")
-  if not _wait_for_avito_filters_panel(driver, timeout_sec=45, stop_event=stop_event):
+  panel_ok = _wait_for_avito_filters_panel(driver, timeout_sec=45, stop_event=stop_event)
+  if not panel_ok:
     print(
       "[AVITO] Колонка фильтров не появилась по таймауту — клики могут не сработать. "
       "Проверьте [AVITO][diag:*] и скорость сети."
     )
+    # Попробуем ещё раз открыть панель и быстро перепроверить наличие фильтров в DOM.
+    _try_open_avito_filters_drawer(driver)
+    sleep(0.8)
+    _wait_for_avito_filters_panel(driver, timeout_sec=20, stop_event=stop_event)
   sleep(1.0)
 
   _log_avito_filters_diagnostics(driver, "before_drawer")
