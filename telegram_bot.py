@@ -356,15 +356,9 @@ def format_settings_for_user(settings: dict):
     f"• Название: {settings.get('keyword') or '-'}\n"
     f"• Модель: {settings.get('model') or '-'}\n"
     f"• Город: {settings.get('city') or '-'}\n"
-    f"• Цена: {settings.get('price_min') or '-'} — {settings.get('price_max') or '-'}\n\n"
-    "Расширенные фильтры:\n"
+    f"• Цена: {settings.get('price_min') or '-'} — {settings.get('price_max') or '-'}\n"
     f"• Память: {_format_list(settings.get('memory'))}\n"
-    f"• Оперативная память: {_format_list(settings.get('ram'))}\n"
-    f"• SIM: {_format_list(settings.get('sim'))}\n"
-    f"• Цвета: {_format_list(settings.get('colors'))}\n"
-    f"• Состояние: {_format_list(settings.get('condition'))}\n"
-    f"• Продавцы: {'-' if not settings.get('seller_type') or settings.get('seller_type') == 'all' else settings.get('seller_type')}\n"
-    f"• Только 4 звезды и выше: {'да' if settings.get('rating_4_plus') is True else '-'}\n"
+    "• Продавцы: только частные (не магазин)\n"
     f"• Точность парсинга: {settings.get('precision') or '-'}"
   )
 
@@ -533,12 +527,8 @@ async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFA
 
   filters = {
     "memory": normalize_capacity_values(settings.get("memory") or []),
-    "ram": normalize_capacity_values(settings.get("ram") or []),
-    "sim": settings.get("sim") or [],
-    "colors": settings.get("colors") or [],
-    "condition": settings.get("condition") or [],
-    "seller_type": settings.get("seller_type") or "all",
-    "rating_4_plus": bool(settings.get("rating_4_plus")),
+    # Быстрый режим: только фильтры, которые надёжно видны прямо в выдаче.
+    "seller_type": "private",
   }
 
   stop_event = threading.Event()
@@ -551,6 +541,7 @@ async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFA
 
   def _sync_once():
     driver = None
+    partial_items: list[dict] = []
     try:
       driver = build_driver(headless=True)
       context.user_data["active_parse"]["driver"] = driver
@@ -667,6 +658,13 @@ async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFA
           print(f"[bot] Ошибка recreate driver: {e}")
           return None
 
+      def _checkpoint_cb(items_snapshot: list[dict]):
+        nonlocal partial_items
+        try:
+          partial_items = list(items_snapshot or [])
+        except Exception:
+          partial_items = []
+
       items = parse_avito(
         driver,
         keyword,
@@ -681,11 +679,20 @@ async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFA
         today_only=today_only,
         status_callback=_status_callback,
         driver_recreate_callback=_recreate_driver,
+        checkpoint_callback=_checkpoint_cb,
       )
       if stop_event.is_set():
         return None
       filepath = export_to_excel(items, filename_prefix="parsing_avito")
       return filepath
+    except Exception:
+      # Чекпоинт: если парсинг упал, но что-то уже собрано — сохраняем.
+      if partial_items:
+        try:
+          return export_to_excel(partial_items, filename_prefix="parsing_avito_partial")
+        except Exception:
+          pass
+      raise
     finally:
       try:
         if driver:
@@ -780,13 +787,12 @@ def upsert_user_settings(client: Client, telegram_id: int, settings: dict):
     "price_min": settings.get("price_min"),
     "price_max": settings.get("price_max"),
     "memory": normalize_capacity_values(settings.get("memory") or []),
-    "ram": normalize_capacity_values(settings.get("ram") or []),
-    "sim": settings.get("sim") or [],
-    "colors": settings.get("colors") or [],
-    "condition": settings.get("condition") or [],
-    # NULL/None = "значение по умолчанию" (фильтр не применяется)
-    "seller_type": settings.get("seller_type"),
-    "rating_4_plus": settings.get("rating_4_plus"),
+    "ram": [],
+    "sim": [],
+    "colors": [],
+    "condition": [],
+    "seller_type": "private",
+    "rating_4_plus": None,
     "precision": settings.get("precision") or 7,
     "updated_at": now_iso,
   }
@@ -818,7 +824,7 @@ def merge_manual_settings_with_autoparse(manual: dict | None, auto: dict | None)
   auto = dict(auto or {})
   filled: list[str] = []
   out = {**auto, **manual}
-  for k in ("memory", "ram", "sim", "colors", "condition"):
+  for k in ("memory",):
     if not out.get(k) and auto.get(k):
       out[k] = auto[k]
       filled.append(k)
@@ -826,10 +832,9 @@ def merge_manual_settings_with_autoparse(manual: dict | None, auto: dict | None)
     if out.get(k) in (None, "") and auto.get(k) not in (None, ""):
       out[k] = auto[k]
       filled.append(k)
-  if out.get("seller_type") in (None, "") and auto.get("seller_type") not in (None, ""):
-    out["seller_type"] = auto["seller_type"]
-    filled.append("seller_type")
-  # rating_4_plus: берётся из {**auto, **manual}; явное значение в ручной строке не перезаписываем.
+  # Быстрый режим: только частные продавцы.
+  out["seller_type"] = "private"
+  out["rating_4_plus"] = None
   if manual:
     out["today_only"] = bool(manual.get("today_only"))
   else:
@@ -852,12 +857,12 @@ def bot_settings_to_manual_dict(bot: dict) -> dict:
     "price_min": bot.get("price_min"),
     "price_max": bot.get("price_max"),
     "memory": normalize_capacity_values(bot.get("memory") or []),
-    "ram": normalize_capacity_values(bot.get("ram") or []),
-    "sim": bot.get("sim") or [],
-    "colors": bot.get("colors") or [],
-    "condition": bot.get("condition") or [],
-    "seller_type": bot.get("seller_type"),
-    "rating_4_plus": bot.get("rating_4_plus"),
+    "ram": [],
+    "sim": [],
+    "colors": [],
+    "condition": [],
+    "seller_type": "private",
+    "rating_4_plus": None,
     "precision": int(bot.get("precision") or 7),
   }
 
@@ -878,12 +883,12 @@ def upsert_manual_settings(client: Client, telegram_id: int, settings: dict, tod
     "price_min": settings.get("price_min"),
     "price_max": settings.get("price_max"),
     "memory": normalize_capacity_values(settings.get("memory") or []),
-    "ram": normalize_capacity_values(settings.get("ram") or []),
-    "sim": settings.get("sim") or [],
-    "colors": settings.get("colors") or [],
-    "condition": settings.get("condition") or [],
-    "seller_type": settings.get("seller_type"),
-    "rating_4_plus": settings.get("rating_4_plus"),
+    "ram": [],
+    "sim": [],
+    "colors": [],
+    "condition": [],
+    "seller_type": "private",
+    "rating_4_plus": None,
     "precision": int(settings.get("precision") or 7),
     "today_only": t,
     "updated_at": now_iso,
@@ -1093,16 +1098,12 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
           "sim": [],
           "colors": [],
           "condition": [],
-          "seller_type": None,
+          "seller_type": "private",
           "rating_4_plus": None,
           "precision": 7,
         }
-      else:
-        # Нормализуем старые/дефолтные значения: "не применять фильтр" = None
-        if settings.get("seller_type") == "all":
-          settings["seller_type"] = None
-        if settings.get("rating_4_plus") is not True:
-          settings["rating_4_plus"] = None
+      settings["seller_type"] = "private"
+      settings["rating_4_plus"] = None
 
       await update.message.reply_text(
         f"{format_settings_for_user(settings)}\n\nНажмите “{BTN_EDIT}”, чтобы изменить настройки.",
@@ -1128,7 +1129,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
       wizard["draft"] = dict(base)
       wizard["state"] = "keyword"
       await update.message.reply_text(
-        "Шаг 1/14. Введите Название (например: iPhone, Samsung).\n"
+        "Шаг 1/7. Введите Название (например: iPhone, Samsung).\n"
         "Если не нужно менять — вводи '-'.",
         reply_markup=build_cancel_keyboard(),
       )
@@ -1148,7 +1149,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
           wizard["state"] = "model"
           await update.message.reply_text(
             "Пропускаем название. Берем текущее значение.\n"
-            "Шаг 2/14. Введите модель (например: 17 pro max, galaxy se):",
+            "Шаг 2/7. Введите модель (например: 17 pro max, galaxy se):",
             reply_markup=build_cancel_keyboard(),
           )
           return
@@ -1161,7 +1162,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
       wizard["draft"] = draft
       wizard["state"] = "model"
       await update.message.reply_text(
-        "Шаг 2/14. Введите модель (например: 17 pro max, galaxy se):",
+        "Шаг 2/7. Введите модель (например: 17 pro max, galaxy se):",
         reply_markup=build_cancel_keyboard(),
       )
       return
@@ -1173,7 +1174,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
           wizard["state"] = "city"
           await update.message.reply_text(
             "Пропускаем модель. Берем текущее значение.\n"
-            "Шаг 3/14. Введите город (например: Самара):",
+            "Шаг 3/7. Введите город (например: Самара):",
             reply_markup=build_cancel_keyboard(),
           )
           return
@@ -1186,7 +1187,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
       wizard["draft"] = draft
       wizard["state"] = "city"
       await update.message.reply_text(
-        "Шаг 3/14. Введите город (например: Самара):",
+        "Шаг 3/7. Введите город (например: Самара):",
         reply_markup=build_cancel_keyboard(),
       )
       return
@@ -1198,7 +1199,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
           wizard["state"] = "price_min"
           await update.message.reply_text(
             "Пропускаем город. Берем текущее значение.\n"
-            "Шаг 4/14. Цена от (число, пример: 15000):",
+            "Шаг 4/7. Цена от (число, пример: 15000):",
             reply_markup=build_cancel_keyboard(),
           )
           return
@@ -1211,7 +1212,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
       wizard["draft"] = draft
       wizard["state"] = "price_min"
       await update.message.reply_text(
-        "Шаг 4/14. Цена от (число, пример: 15000):",
+        "Шаг 4/7. Цена от (число, пример: 15000):",
         reply_markup=build_cancel_keyboard(),
       )
       return
@@ -1223,7 +1224,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         wizard["state"] = "price_max"
         await update.message.reply_text(
           "Пропускаем цену от. Берем текущее значение (если есть) или None.\n"
-          "Шаг 5/14. Цена до (число, пример: 35000):",
+          "Шаг 5/7. Цена до (число, пример: 35000):",
           reply_markup=build_cancel_keyboard(),
         )
         return
@@ -1235,7 +1236,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
       wizard["draft"] = draft
       wizard["state"] = "price_max"
       await update.message.reply_text(
-        "Шаг 5/14. Цена до (число, пример: 35000):",
+        "Шаг 5/7. Цена до (число, пример: 35000):",
         reply_markup=build_cancel_keyboard(),
       )
       return
@@ -1247,7 +1248,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         wizard["state"] = "memory"
         await update.message.reply_text(
           "Пропускаем цену до. Берем None.\n"
-          "Шаг 6/14. Память (через запятую, пример: 128 ГБ,256 ГБ):",
+          "Шаг 6/7. Память (через запятую, пример: 128 ГБ,256 ГБ):",
           reply_markup=build_cancel_keyboard(),
         )
         return
@@ -1262,7 +1263,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
       wizard["draft"] = draft
       wizard["state"] = "memory"
       await update.message.reply_text(
-        "Шаг 6/14. Память (через запятую, пример: 128 ГБ,256 ГБ):",
+        "Шаг 6/7. Память (через запятую, пример: 128 ГБ,256 ГБ):",
         reply_markup=build_cancel_keyboard(),
       )
       return
@@ -1271,10 +1272,10 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
       if user_text == "-":
         draft["memory"] = []
         wizard["draft"] = draft
-        wizard["state"] = "ram"
+        wizard["state"] = "precision"
         await update.message.reply_text(
           "Пропускаем память. Фильтр не применяется.\n"
-          "Шаг 7/14. Оперативная память (пример: 4 ГБ,6 ГБ):",
+          "Шаг 7/7. Точность парсинга (1–10):",
           reply_markup=build_cancel_keyboard(),
         )
         return
@@ -1284,9 +1285,9 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
       draft["memory"] = normalize_capacity_values(items)
       wizard["draft"] = draft
-      wizard["state"] = "ram"
+      wizard["state"] = "precision"
       await update.message.reply_text(
-        "Шаг 7/14. Оперативная память (пример: 4 ГБ,6 ГБ):",
+        "Шаг 7/7. Точность парсинга (1–10):",
         reply_markup=build_cancel_keyboard(),
       )
       return

@@ -83,24 +83,26 @@ def _resolve_avito_iphone_apple_segment(keyword: str, model: str) -> str | None:
 
 
 def _filters_to_excel_meta(filters, *, applied_mode: str = "", ui_applied_note: str = ""):
-  """Запрос пользователя + как реально отобрали (UI / текст карточек)."""
+  """Запрос пользователя + как реально отобрали (быстрый режим по выдаче)."""
   filters = filters or {}
   return {
     "avito_filter_memory": ", ".join(filters.get("memory", [])),
-    "avito_filter_ram": ", ".join(filters.get("ram", [])),
-    "avito_filter_sim": ", ".join(filters.get("sim", [])),
-    "avito_filter_colors": ", ".join(filters.get("colors", [])),
-    "avito_filter_condition": ", ".join(filters.get("condition", [])),
-    "avito_filter_seller_type": (filters.get("seller_type") or "all"),
-    "avito_filter_rating_4_plus": "yes" if filters.get("rating_4_plus") else "no",
+    "avito_filter_seller_type": (filters.get("seller_type") or "private"),
     "avito_filter_applied_mode": applied_mode or "",
     "avito_ui_applied_note": ui_applied_note or "",
   }
 
 
 def _item_search_blob(item: dict) -> str:
-  parts = [item.get("title") or "", item.get("url") or ""]
+  parts = [item.get("title") or "", item.get("url") or "", item.get("seller_text") or ""]
   return " ".join(parts).lower()
+
+
+def _matches_memory_from_listing(item: dict, values) -> bool:
+  if not values:
+    return True
+  blob = _item_search_blob(item)
+  return _text_matches_capacity(blob, values)
 
 
 def _text_matches_capacity(blob: str, values) -> bool:
@@ -2991,6 +2993,36 @@ def _extract_card_date_text_selenium(card):
   return ""
 
 
+def _extract_card_seller_text_selenium(card):
+  """Имя/блок продавца прямо из карточки выдачи."""
+  selectors = [
+    "[data-marker*='seller']",
+    "[class*='seller']",
+    "[class*='iva-seller']",
+    "[data-marker*='profile']",
+  ]
+  for sel in selectors:
+    try:
+      els = card.find_elements(By.CSS_SELECTOR, sel)
+      for el in els[:5]:
+        t = (el.text or "").strip()
+        if t and len(t) <= 120:
+          return t
+    except Exception:
+      continue
+  return ""
+
+
+def _is_private_seller_text(seller_text: str) -> bool:
+  s = (seller_text or "").strip().lower()
+  if not s:
+    return False
+  if any(x in s for x in ("магазин", "официальн", "компан", "company", "shop")):
+    return False
+  # Для частников обычно есть человеческое имя.
+  return bool(re.search(r"[a-zа-я]{2,}", s, re.I))
+
+
 def _is_avito_today_text(text):
   """Объявление «за сегодня» по подписи времени на карточке."""
   s = (text or "").strip().lower()
@@ -3030,6 +3062,7 @@ def _parse_cards_from_html(driver):
     price = None
     city_text = ""
     date_text = ""
+    seller_text = ""
     if container is not None:
       price_tag = container.select_one(
         "[data-marker='item-price'] [data-marker='item-price-value'], "
@@ -3044,6 +3077,8 @@ def _parse_cards_from_html(driver):
         "[class*='item-date']"
       )
       date_text = (date_tag.get_text(" ", strip=True) if date_tag else "") or ""
+      seller_tag = container.select_one("[data-marker*='seller'], [class*='seller'], [class*='iva-seller']")
+      seller_text = (seller_tag.get_text(" ", strip=True) if seller_tag else "") or ""
 
     items.append(
       {
@@ -3053,6 +3088,8 @@ def _parse_cards_from_html(driver):
         "url": href,
         "city": city_text or None,
         "date_text": date_text or None,
+        "seller_text": seller_text or None,
+        "is_private_seller": bool(_is_private_seller_text(seller_text)),
       }
     )
     seen_urls.add(href)
@@ -3100,6 +3137,7 @@ def _parse_cards_to_items(cards, city, price_min, price_max):
         pass
 
       date_text = _extract_card_date_text_selenium(card)
+      seller_text = _extract_card_seller_text_selenium(card)
 
       # Фильтр по городу делаем на уровне URL (/samara/...), а не по тексту карточки.
       # В карточках город может быть указан как район/пригород и давать ложные отсеивания.
@@ -3117,6 +3155,8 @@ def _parse_cards_to_items(cards, city, price_min, price_max):
         "url": href,
         "city": city_text or None,
         "date_text": date_text or None,
+        "seller_text": seller_text or None,
+        "is_private_seller": bool(_is_private_seller_text(seller_text)),
       })
       stats["parsed_ok"] += 1
     except Exception:
@@ -3139,6 +3179,7 @@ def parse_avito(
   today_only=False,
   status_callback=None,
   driver_recreate_callback=None,
+  checkpoint_callback=None,
 ):
   """Поэтапно: одна страница → пауза → скролл по шагам → сбор → длинная пауза → следующая страница."""
   params = _precision_params(precision)
@@ -3156,9 +3197,9 @@ def parse_avito(
   filtered_base_url = ""
   effective_max_pages = min(max_pages, AVITO_MAX_PAGES_PER_RUN)
   detected_pages = 1
-  fallback_without_ui_filters_done = False
+  fallback_without_ui_filters_done = True
   parse_scope_announced = False
-  ui_filters_temporarily_disabled = False
+  ui_filters_temporarily_disabled = True
 
   # Пауза перед первым запросом (даём сети/прокси «остыть» перед заходом)
   if page == 1:
@@ -3418,9 +3459,7 @@ def parse_avito(
 
     # Критично: НЕ продолжаем, пока не появились карточки и (для стр.1 с фильтрами) панель фильтров.
     # Иначе клики по фильтрам идут в пустой DOM и фильтры «не находятся».
-    need_filters_panel = bool(
-      page == 1 and filters and not fallback_without_ui_filters_done and _has_meaningful_avito_ui_filters(filters)
-    )
+    need_filters_panel = False
     if status_callback:
       try:
         status_callback(
@@ -3433,7 +3472,7 @@ def parse_avito(
         )
       except Exception as e:
         print(f"[AVITO] status_callback: {e}")
-    ui_filters_temporarily_disabled = False
+    ui_filters_temporarily_disabled = True
     dom_ready = False
     # По требованию: DOM-перезаходы ограничиваем тремя попытками, чтобы не зависать слишком долго.
     dom_reload_max = min(int(AVITO_DOM_RELOAD_TRIES), 3)
@@ -3696,19 +3735,13 @@ def parse_avito(
 
     wait = WebDriverWait(driver, EXPLICIT_WAIT)
     # КРИТИЧНО: после fallback «без UI» нельзя снова жать фильтры — иначе снова 0 карточек.
-    if (
-      page == 1
-      and filters
-      and not fallback_without_ui_filters_done
-      and not ui_filters_temporarily_disabled
-      and _has_meaningful_avito_ui_filters(filters)
-    ):
+    if False:
       if status_callback:
         try:
           status_callback({"phase": "applying_filters"})
         except Exception as e:
           print(f"[AVITO] status_callback: {e}")
-    if page == 1 and filters and not fallback_without_ui_filters_done and not ui_filters_temporarily_disabled:
+    if False:
       try:
         meaningful = _has_meaningful_avito_ui_filters(filters or {})
         max_apply_attempts = 3 if meaningful else 1
@@ -3826,8 +3859,8 @@ def parse_avito(
       except Exception as e:
         print(f"[AVITO] Не удалось корректно применить фильтры: {e}")
         raise
-    elif page == 1 and filters and fallback_without_ui_filters_done:
-      print("[AVITO] Повтор после пустой выдачи: UI-фильтры отключены, парсинг по базовому запросу + текстовый отбор в конце.")
+    elif page == 1:
+      print("[AVITO] Быстрый режим: без UI-фильтров, отбор по выдаче (цена/память/сегодня/частник).")
     if scroll_passes > 0:
       _scroll_page(driver, scroll_passes, scroll_delay, stop_event=stop_event)
 
@@ -3940,7 +3973,24 @@ def parse_avito(
       if dropped:
         print(f"[AVITO] Режим «только сегодня»: отфильтровано {dropped} объявлений (нет даты / не сегодня).")
 
+    # Быстрая фильтрация по карточке выдачи (без захода в объявление).
+    if filters.get("memory"):
+      before = len(unique_items)
+      unique_items = [it for it in unique_items if _matches_memory_from_listing(it, filters.get("memory"))]
+      if before != len(unique_items):
+        print(f"[AVITO] Фильтр памяти (выдача): отфильтровано {before - len(unique_items)} объявлений.")
+    if str(filters.get("seller_type") or "private").lower() == "private":
+      before = len(unique_items)
+      unique_items = [it for it in unique_items if bool(it.get("is_private_seller"))]
+      if before != len(unique_items):
+        print(f"[AVITO] Фильтр «только частные»: отфильтровано {before - len(unique_items)} объявлений.")
+
     all_items.extend(_enrich_items_with_filter_meta(unique_items, filter_meta))
+    if checkpoint_callback:
+      try:
+        checkpoint_callback(all_items)
+      except Exception as e:
+        print(f"[AVITO] checkpoint_callback: {e}")
     if status_callback:
       try:
         status_callback(
@@ -3971,23 +4021,7 @@ def parse_avito(
       _sleep_with_stop(stop_event, delay)
 
   text_fallback_ran = False
-  if filters and _need_text_fallback(ui_applied, filters):
-    before = len(all_items)
-    narrowed = _post_filter_avito_items_by_text(all_items, filters, ui_applied)
-    if len(narrowed) == 0 and before > 0:
-      print(
-        "[AVITO] Текстовый fallback дал 0 позиций — оставляю исходную выдачу "
-        "(строгий отбор по title/URL отменён, чтобы не было пустого отчёта)."
-      )
-    else:
-      all_items = narrowed
-      text_fallback_ran = True
-      print(
-        f"[AVITO] Текстовый fallback (UI не применил часть фильтров): было {before} позиций, "
-        f"после отбора по title/URL — {len(all_items)}."
-      )
-
-  mode, mode_note = _describe_applied_mode(filters, ui_applied, text_fallback_ran)
+  mode, mode_note = ("fast_listing", "Отбор по выдаче: price + memory + today_only + private seller")
   final_meta = _filters_to_excel_meta(filters, applied_mode=mode, ui_applied_note=mode_note)
   for item in all_items:
     item.update(final_meta)

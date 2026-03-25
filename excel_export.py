@@ -14,12 +14,7 @@ BASE_HEADERS = [
 
 AVITO_FILTER_HEADERS = [
   "avito_filter_memory",
-  "avito_filter_ram",
-  "avito_filter_sim",
-  "avito_filter_colors",
-  "avito_filter_condition",
   "avito_filter_seller_type",
-  "avito_filter_rating_4_plus",
   "avito_filter_applied_mode",
   "avito_ui_applied_note",
 ]
