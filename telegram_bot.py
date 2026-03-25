@@ -25,6 +25,8 @@ BTN_MANUAL_RUN = "🚀 Ручной запуск"
 BTN_HELP = "📘 Инструкция"
 BTN_AUTO_SETTINGS = "⚙️ Настройки автопарсинга"
 BTN_EXCEL = "📄 Excel файлы"
+BTN_EXCEL_SHOW = "📥 Показать Excel файлы"
+BTN_EXCEL_DELETE = "🗑 Удалить Excel файл"
 BTN_AVITO = "🇦🇺 Авито"
 BTN_WB = "🛒 ВБ"
 BTN_CANCEL = "Отмена"
@@ -108,6 +110,20 @@ def build_manual_avito_keyboard():
     [KeyboardButton(BTN_MANUAL_AVITO_MY), KeyboardButton(BTN_MANUAL_AVITO_MANUAL)],
     [KeyboardButton(BTN_CANCEL)],
   ]
+  return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True, one_time_keyboard=False)
+
+
+def build_excel_menu_keyboard():
+  keyboard = [
+    [KeyboardButton(BTN_EXCEL_SHOW), KeyboardButton(BTN_EXCEL_DELETE)],
+    [KeyboardButton(BTN_CANCEL)],
+  ]
+  return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True, one_time_keyboard=False)
+
+
+def build_excel_delete_keyboard(labels: list[str]):
+  keyboard = [[KeyboardButton(x)] for x in labels]
+  keyboard.append([KeyboardButton(BTN_CANCEL)])
   return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True, one_time_keyboard=False)
 
 
@@ -374,18 +390,65 @@ def upload_excel_file_to_supabase(supabase: Client, telegram_id: int, filepath: 
   return supabase.table(SUPABASE_EXCEL_FILES_TABLE).insert(payload).execute()
 
 
+def list_excel_files_for_user(supabase: Client, telegram_id: int, limit: int = 20):
+  res = (
+    supabase.table(SUPABASE_EXCEL_FILES_TABLE)
+    .select("id, filename, content_base64, created_at")
+    .eq("telegram_id", telegram_id)
+    .order("created_at", desc=True)
+    .limit(limit)
+    .execute()
+  )
+  return res.data or []
+
+
+def delete_excel_file_from_supabase(supabase: Client, telegram_id: int, file_id):
+  return (
+    supabase.table(SUPABASE_EXCEL_FILES_TABLE)
+    .delete()
+    .eq("telegram_id", telegram_id)
+    .eq("id", file_id)
+    .execute()
+  )
+
+
+def _try_delete_excel_from_disk(filename: str):
+  """Пробуем удалить физический xlsx с диска (если сохранился локально)."""
+  if not filename:
+    return False
+  candidates = []
+  try:
+    candidates.append(os.path.abspath(filename))
+  except Exception:
+    pass
+  try:
+    candidates.append(os.path.join(os.getcwd(), filename))
+  except Exception:
+    pass
+  # На сервере сервис чаще всего работает из /opt/iFind
+  candidates.append(os.path.join("/opt/iFind", filename))
+
+  seen = set()
+  for p in candidates:
+    if not p:
+      continue
+    ap = os.path.abspath(p)
+    if ap in seen:
+      continue
+    seen.add(ap)
+    try:
+      if os.path.exists(ap):
+        os.remove(ap)
+        return True
+    except Exception:
+      continue
+  return False
+
+
 async def send_excel_files_from_supabase(update: Update, context: ContextTypes.DEFAULT_TYPE):
   supabase: Client = context.bot_data.get("supabase_client")
   telegram_id = update.effective_user.id
-  res = (
-    supabase.table(SUPABASE_EXCEL_FILES_TABLE)
-    .select("filename, content_base64, created_at")
-    .eq("telegram_id", telegram_id)
-    .order("created_at", desc=True)
-    .limit(10)
-    .execute()
-  )
-  files = res.data or []
+  files = list_excel_files_for_user(supabase, telegram_id, limit=10)
   if not files:
     await update.message.reply_text("Пока нет сохраненных Excel файлов.")
     return
@@ -399,6 +462,32 @@ async def send_excel_files_from_supabase(update: Update, context: ContextTypes.D
       await update.message.reply_document(document=bio, filename=bio.name)
     except Exception as e:
       print(f"[Supabase] Ошибка отправки файла: {e}")
+
+
+async def ask_excel_file_to_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+  supabase: Client = context.bot_data.get("supabase_client")
+  telegram_id = update.effective_user.id
+  files = list_excel_files_for_user(supabase, telegram_id, limit=15)
+  if not files:
+    await update.message.reply_text("Пока нет Excel файлов для удаления.", reply_markup=build_main_keyboard())
+    return
+
+  labels = []
+  mapping = {}
+  for i, f in enumerate(files, start=1):
+    filename = str(f.get("filename") or "file.xlsx")
+    short = filename if len(filename) <= 42 else (filename[:39] + "...")
+    label = f"🗑 {i}. {short}"
+    labels.append(label)
+    mapping[label] = {"id": f.get("id"), "filename": filename}
+    mapping[str(i)] = {"id": f.get("id"), "filename": filename}
+
+  context.user_data["awaiting_excel_delete"] = True
+  context.user_data["excel_delete_map"] = mapping
+  await update.message.reply_text(
+    "Выберите файл для удаления:",
+    reply_markup=build_excel_delete_keyboard(labels),
+  )
 
 
 async def ask_parse_scope_before_run(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -842,6 +931,46 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"[Supabase] Не удалось обновить last_seen: {e}")
 
   user_text = (update.message.text or "").strip()
+
+  # Удаление Excel: ожидаем выбор файла из списка.
+  if context.user_data.get("awaiting_excel_delete"):
+    if user_text == BTN_CANCEL:
+      context.user_data.pop("awaiting_excel_delete", None)
+      context.user_data.pop("excel_delete_map", None)
+      await update.message.reply_text("Удаление отменено.", reply_markup=build_main_keyboard())
+      return
+    mapping = context.user_data.get("excel_delete_map") or {}
+    row = mapping.get(user_text)
+    if not row:
+      # fallback: если пользователь отправил только число
+      m = re.search(r"\d+", user_text or "")
+      if m:
+        row = mapping.get(m.group(0))
+    if not row:
+      labels = [k for k in mapping.keys() if isinstance(k, str) and k.startswith("🗑 ")]
+      await update.message.reply_text(
+        "Выберите файл кнопкой из списка или нажмите «Отмена».",
+        reply_markup=build_excel_delete_keyboard(labels) if labels else build_main_keyboard(),
+      )
+      return
+    supabase: Client = context.bot_data.get("supabase_client")
+    telegram_id = update.effective_user.id
+    file_id = row.get("id")
+    filename = row.get("filename") or "file.xlsx"
+    try:
+      delete_excel_file_from_supabase(supabase, telegram_id, file_id)
+    except Exception as e:
+      await update.message.reply_text(f"Ошибка удаления из БД: {e}", reply_markup=build_main_keyboard())
+      return
+    deleted_disk = _try_delete_excel_from_disk(filename)
+    context.user_data.pop("awaiting_excel_delete", None)
+    context.user_data.pop("excel_delete_map", None)
+    await update.message.reply_text(
+      f"Удалено из БД: {filename}\n"
+      f"Файл на диске: {'удален' if deleted_disk else 'не найден/не удален'}",
+      reply_markup=build_main_keyboard(),
+    )
+    return
 
   # Остановка текущего парсинга (если идет)
   active_parse = context.user_data.get("active_parse")
@@ -1490,8 +1619,19 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return
 
   if user_text == BTN_EXCEL:
+    await update.message.reply_text(
+      "Управление Excel файлами:",
+      reply_markup=build_excel_menu_keyboard(),
+    )
+    return
+
+  if user_text == BTN_EXCEL_SHOW:
     await send_excel_files_from_supabase(update, context)
     await update.message.reply_text("Готово.", reply_markup=build_main_keyboard())
+    return
+
+  if user_text == BTN_EXCEL_DELETE:
+    await ask_excel_file_to_delete(update, context)
     return
 
   if user_text == BTN_MANUAL_RUN:
