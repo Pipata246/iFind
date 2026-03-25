@@ -2815,7 +2815,7 @@ def parse_avito(
               )
               _sleep_with_stop(stop_event, random.uniform(3.0, 8.0))
               _open_avito_with_soft_entry(
-                driver, url, stop_event=stop_event, include_home=True, reset_session=False
+                driver, url, stop_event=stop_event, include_home=True, reset_session=True
               )
             elif attempt == 1:
               print(
@@ -2831,7 +2831,7 @@ def parse_avito(
               )
               _sleep_with_stop(stop_event, random.uniform(2.5, 6.0))
               _open_avito_with_soft_entry(
-                driver, url, stop_event=stop_event, include_home=True, reset_session=False
+                driver, url, stop_event=stop_event, include_home=True, reset_session=(br > 1)
               )
             else:
               print("[AVITO] Последняя попытка: мягкий вход через главную со сбросом сессии…")
@@ -3071,7 +3071,7 @@ def parse_avito(
         try:
           if page == 1:
             _open_avito_with_soft_entry(
-              driver, url, stop_event=stop_event, include_home=True, reset_session=False
+              driver, url, stop_event=stop_event, include_home=True, reset_session=True
             )
           else:
             driver.get(AVITO_BASE_URL)
