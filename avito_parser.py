@@ -1767,12 +1767,13 @@ def _collect_selected_filters_from_dom(driver):
           seen.add(v);
           arr.push(v);
         }
-        var nodes = [];
         var roots = [];
         var a = document.querySelector('aside');
         if (a) roots.push(a);
         document.querySelectorAll('[role="complementary"]').forEach(function(n){ roots.push(n); });
         document.querySelectorAll('[data-marker*="filter"],[data-marker*="params"],[class*="SearchFilters"],[class*="search-filters"],[class*="serp-filters"],[class*="catalog-filters"]').forEach(function(n){ roots.push(n); });
+        // Если фильтры в оверлее/дровере — часто нет стабильного container. Добавляем body.
+        if (document.body) roots.push(document.body);
         // дедуп roots
         var seenR = new Set();
         var r2 = [];
@@ -1786,18 +1787,30 @@ def _collect_selected_filters_from_dom(driver):
         }
         roots = r2;
 
-        var checked = [];
-        roots.forEach(function(root){
-          if (!root) return;
-          // input checked
-          root.querySelectorAll('input[type="checkbox"]:checked, input[type="radio"]:checked').forEach(function(inp){
-            checked.push(inp);
-          });
-          // aria-selected / aria-checked / aria-pressed
-          root.querySelectorAll('[aria-selected="true"],[aria-checked="true"],[aria-pressed="true"]').forEach(function(n){
-            checked.push(n);
-          });
-        });
+        function collectChecked(doc){
+          var checked = [];
+          try {
+            doc.querySelectorAll('input[type="checkbox"]:checked, input[type="radio"]:checked').forEach(function(inp){ checked.push(inp); });
+            doc.querySelectorAll('[aria-selected="true"],[aria-checked="true"],[aria-pressed="true"]').forEach(function(n){ checked.push(n); });
+          } catch(e){}
+          return checked;
+        }
+
+        // 1) собираем из основного документа (самое надежное)
+        var checked = collectChecked(document);
+        // 2) + если есть same-origin iframes — попробуем и их (часть вёрсток прячет фильтры внутрь iframe)
+        try {
+          var ifs = document.querySelectorAll('iframe');
+          for (var ii=0; ii<ifs.length && ii<6; ii++){
+            try {
+              var idoc = ifs[ii].contentDocument;
+              if (idoc) {
+                var more = collectChecked(idoc);
+                for (var j=0;j<more.length;j++) checked.push(more[j]);
+              }
+            } catch(e2){}
+          }
+        } catch(e3){}
 
         var out = [];
         var seen = new Set();
@@ -3502,7 +3515,8 @@ def parse_avito(
           raw_ui_sum = sum(
             int(ui_applied.get(k, 0)) for k in ("memory", "ram", "sim", "colors", "condition", "rating_4_plus")
           )
-          has_filter_signature = _has_filter_signature(current_after_filters)
+          # Важно: короткий f= часто означает "только цена", это НЕ подтверждение UI-фильтров.
+          has_filter_signature = _f_param_length(current_after_filters) >= 60
           has_price_signature = _url_has_expected_price_bounds(current_after_filters, price_min, price_max)
           has_color_ok = _color_filter_accepted(current_after_filters, filters, ui_applied)
           has_color_in_path = _url_has_expected_color_path(
