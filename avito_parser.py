@@ -1749,6 +1749,102 @@ def _log_avito_filters_diagnostics(driver, phase: str):
   print(f"[AVITO][diag:{phase}] {payload}")
 
 
+def _collect_selected_filters_from_dom(driver):
+  """Собираем реальные выбранные фильтры из DOM.
+
+  Цель: не доверять одному факту клика (бывают ложные True), а проверить наличие checked/selected state.
+  """
+  try:
+    res = driver.execute_script(
+      r"""
+      try {
+        function norm(t){ return (t||'').toString().replace(/\s+/g,' ').trim(); }
+        function uniqPush(arr, v, seen){
+          if (!v) return;
+          v = norm(v);
+          if (!v || v.length > 90) return;
+          if (seen.has(v)) return;
+          seen.add(v);
+          arr.push(v);
+        }
+        var nodes = [];
+        var roots = [];
+        var a = document.querySelector('aside');
+        if (a) roots.push(a);
+        document.querySelectorAll('[role="complementary"]').forEach(function(n){ roots.push(n); });
+        document.querySelectorAll('[data-marker*="filter"],[data-marker*="params"],[class*="SearchFilters"],[class*="search-filters"],[class*="serp-filters"],[class*="catalog-filters"]').forEach(function(n){ roots.push(n); });
+        // дедуп roots
+        var seenR = new Set();
+        var r2 = [];
+        for (var i=0;i<roots.length;i++){
+          var rr = roots[i];
+          if (!rr) continue;
+          var id = rr.id || (rr.tagName+":"+rr.className+":"+i);
+          if (seenR.has(id)) continue;
+          seenR.add(id);
+          r2.push(rr);
+        }
+        roots = r2;
+
+        var checked = [];
+        roots.forEach(function(root){
+          if (!root) return;
+          // input checked
+          root.querySelectorAll('input[type="checkbox"]:checked, input[type="radio"]:checked').forEach(function(inp){
+            checked.push(inp);
+          });
+          // aria-selected / aria-checked / aria-pressed
+          root.querySelectorAll('[aria-selected="true"],[aria-checked="true"],[aria-pressed="true"]').forEach(function(n){
+            checked.push(n);
+          });
+        });
+
+        var out = [];
+        var seen = new Set();
+        for (var i=0;i<checked.length;i++){
+          var el = checked[i];
+          if (!el) continue;
+          // input -> label
+          try {
+            if (el.tagName && el.tagName.toLowerCase() === 'input') {
+              var id = el.id || '';
+              if (id) {
+                var lab = document.querySelector('label[for="'+id+'"]');
+                if (lab) { uniqPush(out, lab.innerText, seen); continue; }
+              }
+              var pLab = el.closest ? el.closest('label') : null;
+              if (pLab && pLab.innerText) { uniqPush(out, pLab.innerText, seen); continue; }
+              if (el.getAttribute('aria-label')) { uniqPush(out, el.getAttribute('aria-label'), seen); continue; }
+              if (el.value) { uniqPush(out, el.value, seen); continue; }
+            }
+          } catch(e){}
+          // non-input: take text
+          try {
+            if (el.innerText) { uniqPush(out, el.innerText, seen); continue; }
+            if (el.getAttribute && el.getAttribute('aria-label')) { uniqPush(out, el.getAttribute('aria-label'), seen); continue; }
+          } catch(e){}
+        }
+        // иногда selected отображается чипами без checkbox
+        // собираем дополнительно видимые тексты с aria-selected=true
+        if (out.length < 3) {
+          document.querySelectorAll('[aria-selected="true"],[aria-pressed="true"],[aria-checked="true"]').forEach(function(n){
+            try { if (n && n.offsetParent !== null) uniqPush(out, n.innerText, seen); } catch(e){}
+          });
+        }
+        return out;
+      } catch(e){
+        return [];
+      }
+      """,
+      )
+    if not isinstance(res, list):
+      return ""
+    blob = " | ".join(str(x) for x in res if x)
+    return blob
+  except Exception:
+    return ""
+
+
 def _wait_for_avito_filters_panel(driver, timeout_sec=45, stop_event=None):
   """Ждём колонку фильтров: иначе клики идут в пустой DOM → «не найден фильтр»."""
   deadline = time.monotonic() + float(timeout_sec)
@@ -2419,6 +2515,61 @@ def _apply_avito_ui_filters(driver, filters, stop_event=None):
     )
   sleep(0.8)
   applied["_show_clicked"] = 1 if clicked_show else 0
+
+  # Верификация: какие фильтры реально выбраны в DOM.
+  # Это фиксит кейс "кликнул -> считал применённым -> парсит всё подряд".
+  selected_blob = _collect_selected_filters_from_dom(driver)
+  if selected_blob:
+    verified = {
+      "memory": 0,
+      "ram": 0,
+      "sim": 0,
+      "colors": 0,
+      "condition": 0,
+      "seller_type": 0,
+      "rating_4_plus": 0,
+    }
+    for v in filters.get("memory", []) or []:
+      if _text_matches_capacity(selected_blob, [v]):
+        verified["memory"] += 1
+    for v in filters.get("ram", []) or []:
+      if _text_matches_capacity(selected_blob, [v]):
+        verified["ram"] += 1
+    for v in filters.get("sim", []) or []:
+      if _text_matches_sim(selected_blob, [v]):
+        verified["sim"] += 1
+    for v in filters.get("colors", []) or []:
+      if _text_matches_color(selected_blob, [v]):
+        verified["colors"] += 1
+    for v in filters.get("condition", []) or []:
+      if _text_matches_condition(selected_blob, [v]):
+        verified["condition"] += 1
+
+    seller_req = str(filters.get("seller_type") or "all").lower()
+    if seller_req == "all":
+      verified["seller_type"] = 1
+    elif seller_req == "private":
+      verified["seller_type"] = 1 if ("частн" in selected_blob.lower() or "private" in selected_blob.lower() or "личн" in selected_blob.lower()) else 0
+    elif seller_req == "company":
+      verified["seller_type"] = 1 if ("компан" in selected_blob.lower() or "магазин" in selected_blob.lower() or "company" in selected_blob.lower() or "shop" in selected_blob.lower()) else 0
+    else:
+      verified["seller_type"] = 0
+
+    if filters.get("rating_4_plus"):
+      sb = selected_blob.lower()
+      verified["rating_4_plus"] = 1 if ("звезд" in sb or "rating" in sb) and re.search(r"\b4\b", sb) else 0
+
+    applied["memory"] = verified["memory"]
+    applied["ram"] = verified["ram"]
+    applied["sim"] = verified["sim"]
+    applied["colors"] = verified["colors"]
+    applied["condition"] = verified["condition"]
+    applied["seller_type"] = verified["seller_type"]
+    applied["rating_4_plus"] = verified["rating_4_plus"]
+    print(f"[AVITO] UI verified selected filters: {verified} (selected_blob={selected_blob[:120]!r})")
+  else:
+    print("[AVITO] UI verified: не удалось собрать выбранные фильтры из DOM (selected_blob пустой).")
+
   print(
     "[AVITO] Фильтры применены: "
     f"memory={applied['memory']}, ram={applied['ram']}, sim={applied['sim']}, colors={applied['colors']}, "
@@ -3363,6 +3514,7 @@ def parse_avito(
             and has_price_signature
             and has_color_ok
             and has_f_commit
+            and _requested_ui_filters_satisfied(filters or {}, ui_applied or {})
           )
           # Частый случай (новый фронт Avito): фильтры реально применены в колонке и по выдаче,
           # но в адресе нет длинного f= / localPriority — только pmin/pmax/cd и т.д.
