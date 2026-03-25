@@ -170,6 +170,10 @@ def _need_text_fallback(ui_applied: dict, filters: dict) -> bool:
   if not filters:
     return False
   u = ui_applied or {}
+  # Если Avito не "зафиксировал" фильтры в выдаче (часто это видно по URL),
+  # клики в UI могут оказаться ложноположительными — включаем text post-filter.
+  if not bool(u.get("_url_committed", True)) and _has_meaningful_avito_ui_filters(filters or {}):
+    return True
   if filters.get("memory") and u.get("memory", 0) == 0:
     return True
   if filters.get("ram") and u.get("ram", 0) == 0:
@@ -190,24 +194,25 @@ def _need_text_fallback(ui_applied: dict, filters: dict) -> bool:
 
 def _post_filter_avito_items_by_text(items: list, filters: dict, ui_applied: dict) -> list:
   u = ui_applied or {}
+  force_text_filters = not bool(u.get("_url_committed", True))
   out = []
   for item in items:
     blob = _item_search_blob(item)
     ok = True
-    if (filters.get("memory") or []) and u.get("memory", 0) == 0:
+    if (filters.get("memory") or []) and (force_text_filters or u.get("memory", 0) == 0):
       ok = ok and _text_matches_capacity(blob, filters.get("memory"))
-    if (filters.get("ram") or []) and u.get("ram", 0) == 0:
+    if (filters.get("ram") or []) and (force_text_filters or u.get("ram", 0) == 0):
       ok = ok and _text_matches_capacity(blob, filters.get("ram"))
-    if (filters.get("sim") or []) and u.get("sim", 0) == 0:
+    if (filters.get("sim") or []) and (force_text_filters or u.get("sim", 0) == 0):
       ok = ok and _text_matches_sim(blob, filters.get("sim"))
-    if (filters.get("colors") or []) and u.get("colors", 0) == 0:
+    if (filters.get("colors") or []) and (force_text_filters or u.get("colors", 0) == 0):
       ok = ok and _text_matches_color(blob, filters.get("colors"))
-    if (filters.get("condition") or []) and u.get("condition", 0) == 0:
+    if (filters.get("condition") or []) and (force_text_filters or u.get("condition", 0) == 0):
       ok = ok and _text_matches_condition(blob, filters.get("condition"))
     st = str(filters.get("seller_type") or "all").lower()
-    if st == "private" and u.get("seller_type", 0) == 0:
+    if st == "private" and (force_text_filters or u.get("seller_type", 0) == 0):
       ok = ok and ("частн" in blob or "private" in blob or "личн" in blob)
-    if st == "company" and u.get("seller_type", 0) == 0:
+    if st == "company" and (force_text_filters or u.get("seller_type", 0) == 0):
       ok = ok and ("компани" in blob or "магазин" in blob or "shop" in blob)
     if ok:
       out.append(item)
@@ -2421,6 +2426,8 @@ def _apply_avito_ui_filters(driver, filters, stop_event=None):
     f"rating4+={applied['rating_4_plus']}, show_btn={applied['_show_clicked']}, "
     f"url_committed={_url_filters_fully_committed(driver.current_url or '', filters)}"
   )
+  applied["_url_committed"] = 1 if _url_filters_fully_committed(driver.current_url or '', filters) else 0
+  applied["_url_has_f"] = 1 if _has_filter_signature(driver.current_url or '') else 0
   _log_avito_filters_diagnostics(driver, "after_filter_clicks")
   if (
     applied["memory"] + applied["ram"] + applied["sim"] + applied["colors"]
