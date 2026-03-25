@@ -2665,7 +2665,9 @@ def _apply_avito_ui_filters(driver, filters, stop_event=None):
         f"[AVITO] Pre-check UI filters (try {pre_try}/2): "
         f"{ui_pre} (selected_blob={selected_blob_pre[:120]!r})"
       )
-      if _requested_ui_filters_satisfied(filters or {}, ui_pre or {}):
+      # Решение о том, "нужно ли" повторять клики — делаем по факту кликов (applied),
+      # а не по selected_blob (он иногда детектит memory/colors неверно).
+      if _requested_ui_filters_satisfied(filters or {}, applied or {}):
         break
 
       # Реприм недостающие группы
@@ -2783,13 +2785,15 @@ def _apply_avito_ui_filters(driver, filters, stop_event=None):
       sb = selected_blob.lower()
       verified["rating_4_plus"] = 1 if ("звезд" in sb or "rating" in sb) and re.search(r"\b4\b", sb) else 0
 
-    applied["memory"] = verified["memory"]
-    applied["ram"] = verified["ram"]
-    applied["sim"] = verified["sim"]
-    applied["colors"] = verified["colors"]
-    applied["condition"] = verified["condition"]
-    applied["seller_type"] = verified["seller_type"]
-    applied["rating_4_plus"] = verified["rating_4_plus"]
+    # Не "обнуляем" успешные клики из-за того, что selected_blob детектит memory/colors
+    # (и иногда другие блоки) неточно. Берём максимум: клики <= verify.
+    applied["memory"] = max(int(applied.get("memory") or 0), int(verified.get("memory") or 0))
+    applied["ram"] = max(int(applied.get("ram") or 0), int(verified.get("ram") or 0))
+    applied["sim"] = max(int(applied.get("sim") or 0), int(verified.get("sim") or 0))
+    applied["colors"] = max(int(applied.get("colors") or 0), int(verified.get("colors") or 0))
+    applied["condition"] = max(int(applied.get("condition") or 0), int(verified.get("condition") or 0))
+    applied["seller_type"] = max(int(applied.get("seller_type") or 0), int(verified.get("seller_type") or 0))
+    applied["rating_4_plus"] = max(int(applied.get("rating_4_plus") or 0), int(verified.get("rating_4_plus") or 0))
     print(f"[AVITO] UI verified selected filters: {verified} (selected_blob={selected_blob[:120]!r})")
   else:
     print("[AVITO] UI verified: не удалось собрать выбранные фильтры из DOM (selected_blob пустой).")
