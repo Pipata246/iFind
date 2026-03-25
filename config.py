@@ -60,8 +60,9 @@ VPS_LIGHT_MODE = _env_bool("VPS_LIGHT_MODE", False)
 # Для отладки: показать окно браузера в Telegram-ране (headless=False).
 TELEGRAM_SHOW_BROWSER = _env_bool("TELEGRAM_SHOW_BROWSER", False)
 
-# Максимум страниц выдачи Avito за один запуск (выдача может быть на десятках страниц).
-AVITO_MAX_PAGES_PER_RUN = max(1, _env_int("AVITO_MAX_PAGES_PER_RUN", 5))
+# Максимум страниц выдачи Avito за один запуск.
+# По умолчанию высокий лимит, чтобы не резать выдачу на первых страницах.
+AVITO_MAX_PAGES_PER_RUN = max(1, _env_int("AVITO_MAX_PAGES_PER_RUN", 500))
 
 # При капче/блокировке на странице: столько раз ждём (смена IP у моб. прокси) и перезагружаем URL.
 # Счётчик сбрасывается на каждой новой странице выдачи.

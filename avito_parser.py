@@ -324,7 +324,6 @@ def _precision_params(precision):
   load_delay = 5.0 + (precision / 10) * 5.0
   if VPS_LIGHT_MODE:
     # Lower CPU/RAM pressure and overall runtime for weak VPS.
-    max_pages = min(max_pages, 5)
     scroll_passes = max(0, round(scroll_passes * 0.45))
     scroll_delay = max(0.7, scroll_delay * 0.45)
     page_delay = max(4.0, page_delay * 0.25)
@@ -3272,9 +3271,12 @@ def parse_avito(
     print(f"[AVITO] Старт через {first_delay:.0f} сек…")
     _sleep_with_stop(stop_event, first_delay)
 
-  while page <= max_pages:
+  while True:
     if stop_event is not None and stop_event.is_set():
       print("[AVITO] Остановка парсинга по запросу пользователя.")
+      break
+    if page > effective_max_pages:
+      print("[AVITO] Достиг конец страниц по примененным фильтрам.")
       break
     if filtered_base_url:
       url = _build_page_url(filtered_base_url, page)
@@ -3387,10 +3389,25 @@ def parse_avito(
       if page > 1 and f"p={page}" not in current_url:
         print(
           f"[AVITO] Страница p={page} не открылась (URL: {driver.current_url}). "
-          "Похоже, страниц больше нет."
+          "Пробую открыть страницу повторно."
         )
-        abort_page_loop = True
-        break
+        try:
+          driver.get(url)
+          wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT, stop_event)
+          _sleep_with_stop(stop_event, random.uniform(2.0, 4.0))
+        except Exception as e:
+          print(f"[AVITO] Повторный переход на p={page} не удался: {e}")
+        current_url = (driver.current_url or "").lower()
+        if f"p={page}" not in current_url:
+          if block_round < AVITO_BLOCK_MAX_RETRIES_PER_PAGE:
+            print(
+              f"[AVITO] p={page} всё ещё не открылась. Перехожу к следующему раунду "
+              f"{block_round + 1}/{AVITO_BLOCK_MAX_RETRIES_PER_PAGE}."
+            )
+            continue
+          print("[AVITO] Не удалось открыть нужную страницу после всех раундов.")
+          abort_page_loop = True
+          break
 
       delay_after_load = random.uniform(load_delay * 0.8, load_delay * 1.2)
       print(f"[AVITO] Ожидание {delay_after_load:.0f} сек после загрузки…")
@@ -3989,10 +4006,11 @@ def parse_avito(
               )
       except Exception:
         pass
-      effective_max_pages = min(max_pages, max(1, detected_pages), AVITO_MAX_PAGES_PER_RUN)
+      # Идем по всем страницам выдачи; AVITO_MAX_PAGES_PER_RUN — только как аварийный верхний предохранитель.
+      effective_max_pages = min(max(1, detected_pages), AVITO_MAX_PAGES_PER_RUN)
       print(
         f"[AVITO] Страниц в выдаче: {detected_pages}. "
-        f"Буду парсить {effective_max_pages} стр. (макс. {AVITO_MAX_PAGES_PER_RUN} за запуск, precision ≤ {max_pages})."
+        f"Буду парсить {effective_max_pages} стр. подряд."
       )
       if status_callback:
         try:
@@ -4028,8 +4046,7 @@ def parse_avito(
       unique_items.append(item)
 
     if page > 1 and not unique_items:
-      print("[AVITO] На следующей странице нет новых объявлений. Останавливаюсь.")
-      break
+      print("[AVITO] На странице нет новых объявлений. Перехожу к следующей странице.")
 
     if today_only:
       before = len(unique_items)
