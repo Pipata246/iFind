@@ -1043,14 +1043,16 @@ def _js_click_filter_option(driver, raw_text: str, mode: str) -> bool:
             if (inp) {
               try {
                 var before = !!inp.checked;
+                // Если уже отмечено — не переключаем в обратную сторону.
+                if (before) return true;
                 inp.click();
                 var after = !!inp.checked;
-                if (after !== before) return true;
+                if (after) return true;
                 // Иногда checked меняется после клика по label.
                 try { p.click(); } catch (e2x) {}
                 var after2 = !!inp.checked;
-                if (after2 !== before) return true;
-                // Если состояние не поменялось — считаем, что фильтр не применился.
+                if (after2) return true;
+                // Если состояние не стало checked=true — считаем, что фильтр не применился.
               } catch (e2) {}
             }
             p = p.parentElement;
@@ -2601,6 +2603,121 @@ def _apply_avito_ui_filters(driver, filters, stop_event=None):
       print("[AVITO] Рейтинг: применён")
     else:
       print("[AVITO] Не найден фильтр рейтинга: 4 звезды и выше")
+
+  # Пред-проверка: перед кликом "Показать объявления" убеждаемся,
+  # что в DOM действительно отмечены нужные UI-фильтры.
+  # Это критично для сценария "1 в 1": иногда Avito после части кликов
+  # возвращает дефолтные значения (например memory/colors).
+  if _has_meaningful_avito_ui_filters(filters):
+    def _calc_verified_from_blob(blob: str) -> dict:
+      verified = {
+        "memory": 0,
+        "ram": 0,
+        "sim": 0,
+        "colors": 0,
+        "condition": 0,
+        "seller_type": 0,
+        "rating_4_plus": 0,
+      }
+      if not blob:
+        return verified
+      # memory/ram/capacity
+      for v in filters.get("memory", []) or []:
+        if _text_matches_capacity(blob, [v]):
+          verified["memory"] += 1
+      for v in filters.get("ram", []) or []:
+        if _text_matches_capacity(blob, [v]):
+          verified["ram"] += 1
+      for v in filters.get("sim", []) or []:
+        if _text_matches_sim(blob, [v]):
+          verified["sim"] += 1
+      for v in filters.get("colors", []) or []:
+        if _text_matches_color(blob, [v]):
+          verified["colors"] += 1
+      for v in filters.get("condition", []) or []:
+        if _text_matches_condition(blob, [v]):
+          verified["condition"] += 1
+
+      seller_req = str(filters.get("seller_type") or "all").lower()
+      if seller_req == "all":
+        verified["seller_type"] = 1
+      elif seller_req == "private":
+        verified["seller_type"] = (
+          1
+          if ("частн" in blob.lower() or "private" in blob.lower() or "личн" in blob.lower())
+          else 0
+        )
+      elif seller_req == "company":
+        verified["seller_type"] = (
+          1
+          if ("компан" in blob.lower() or "магазин" in blob.lower() or "company" in blob.lower() or "shop" in blob.lower())
+          else 0
+        )
+      else:
+        verified["seller_type"] = 0
+
+      if filters.get("rating_4_plus"):
+        sb = blob.lower()
+        verified["rating_4_plus"] = 1 if ("звезд" in sb or "rating" in sb) and re.search(r"\b4\b", sb) else 0
+      return verified
+
+    # Делаем максимум 2 цикла "если не совпало -> повторить клики недостающего".
+    for pre_try in range(1, 3):
+      selected_blob_pre = _collect_selected_filters_from_dom(driver)
+      if not selected_blob_pre:
+        break
+      ui_pre = _calc_verified_from_blob(selected_blob_pre)
+      print(
+        f"[AVITO] Pre-check UI filters (try {pre_try}/2): "
+        f"{ui_pre} (selected_blob={selected_blob_pre[:120]!r})"
+      )
+      if _requested_ui_filters_satisfied(filters or {}, ui_pre or {}):
+        break
+
+      # Реприм недостающие группы
+      print("[AVITO] UI pre-check не совпал — повторно кликаю недостающие фильтры…")
+      _js_expand_collapsed_filters(driver)
+      sleep(0.3)
+      _try_expand_filter_sections(driver, filters)
+      _scroll_aside_filters_deep(driver)
+      if filters.get("memory") or filters.get("ram") or filters.get("sim") or filters.get("colors"):
+        _click_show_more_filter_options(driver, max_clicks=10)
+      _scroll_aside_filters_deep(driver)
+      sleep(0.25)
+
+      # capacity
+      for value in filters.get("memory", []) or []:
+        if ui_pre.get("memory", 0) < len([x for x in filters.get("memory", []) or [] if str(x).strip()]):
+          _click_text_option_multi(driver, _capacity_variants(value), timeout_sec=18, memory_style=True)
+          sleep(0.15)
+      for value in filters.get("ram", []) or []:
+        if ui_pre.get("ram", 0) < len([x for x in filters.get("ram", []) or [] if str(x).strip()]):
+          _click_text_option_multi(driver, _capacity_variants(value), timeout_sec=18, memory_style=True)
+          sleep(0.15)
+
+      # sim/colors/condition
+      for value in filters.get("sim", []) or []:
+        if ui_pre.get("sim", 0) < len([x for x in filters.get("sim", []) or [] if str(x).strip()]):
+          _click_text_option_multi(driver, _sim_variants(value), timeout_sec=18, memory_style=False)
+          sleep(0.15)
+      for value in filters.get("colors", []) or []:
+        if ui_pre.get("colors", 0) < len([x for x in filters.get("colors", []) or [] if str(x).strip()]):
+          _click_text_option_multi(driver, _color_variants(value), timeout_sec=18, memory_style=False)
+          sleep(0.15)
+      for value in filters.get("condition", []) or []:
+        if ui_pre.get("condition", 0) < len([x for x in filters.get("condition", []) or [] if str(x).strip()]):
+          _click_text_option(driver, value, must_be_checkbox=True)
+          sleep(0.15)
+
+      seller_req = str(filters.get("seller_type") or "all").lower()
+      if seller_req != "all" and ui_pre.get("seller_type", 0) < 1:
+        seller_label = {"private": "Частные", "company": "Компании"}.get(seller_req, "Все")
+        _click_text_option(driver, seller_label, must_be_checkbox=False)
+        sleep(0.2)
+
+      if filters.get("rating_4_plus") and ui_pre.get("rating_4_plus", 0) < 1:
+        _click_text_option_multi(driver, _rating_variants(), timeout_sec=15, memory_style=False)
+        sleep(0.2)
 
   # Кнопка внизу колонки фильтров — без прокрутки и ожидания Avito не фиксирует фильтры в f=.
   _scroll_avito_filters_to_bottom(driver)
