@@ -14,7 +14,6 @@ from browser_helpers import wait_for_document_ready
 from config import (
   AVITO_BASE_URL,
   AVITO_BLOCK_MAX_RETRIES_PER_PAGE,
-  AVITO_BLOCK_RETRY_WAIT_SEC,
   AVITO_DOM_RELOAD_TRIES,
   AVITO_DOM_WAIT_FILTERS_FIRST,
   AVITO_DOM_WAIT_FILTERS_NEXT,
@@ -3334,10 +3333,10 @@ def parse_avito(
                 driver, url, stop_event=stop_event, include_home=False, reset_session=(br > 1)
               )
             else:
-              print("[AVITO] Последняя попытка: мягкий вход через главную со сбросом сессии…")
+              print("[AVITO] Последняя попытка: мягкий вход без главной (со сбросом сессии)…")
               _sleep_with_stop(stop_event, random.uniform(2.0, 5.0))
               _open_avito_with_soft_entry(
-                driver, url, stop_event=stop_event, include_home=True, reset_session=True
+                driver, url, stop_event=stop_event, include_home=False, reset_session=True
               )
           else:
             if prefer_ui_pagination and _try_click_avito_pagination_page(driver, page, stop_event):
@@ -3478,7 +3477,7 @@ def parse_avito(
           )
         except Exception as e:
           print(f"[AVITO] status_callback: {e}")
-      wait_block_sec = float(AVITO_BLOCK_RETRY_WAIT_SEC)
+      wait_block_sec = random.uniform(120.0, 140.0)
       print(
         f"[AVITO] Попытка {block_round}/{AVITO_BLOCK_MAX_RETRIES_PER_PAGE} на странице {page}. "
         f"Пауза {int(wait_block_sec)} сек (новый IP у прокси), затем снова driver.get…"
@@ -3519,8 +3518,6 @@ def parse_avito(
         except Exception as e:
           print(f"[AVITO] status_callback: {e}")
       _sleep_with_stop(stop_event, wait_block_sec)
-      # Дополнительный анти-спайк буфер после ротации IP.
-      _sleep_with_stop(stop_event, random.uniform(8.0, 20.0))
 
     if abort_page_loop:
       break
@@ -3547,7 +3544,7 @@ def parse_avito(
     for dom_try in range(1, dom_reload_max + 1):
       blocked_dom, blocked_reason_dom = _is_avito_blocked(driver)
       if blocked_dom:
-        soft_wait = float(AVITO_BLOCK_RETRY_WAIT_SEC) + random.uniform(18.0, 45.0)
+        soft_wait = random.uniform(120.0, 140.0)
         print(
           f"[AVITO] Во время ожидания DOM обнаружена блокировка ({blocked_reason_dom}). "
           f"Жду {int(soft_wait)} сек и мягко перезахожу на страницу…"
@@ -3584,13 +3581,9 @@ def parse_avito(
         try:
           if page == 1:
             _open_avito_with_soft_entry(
-              driver, url, stop_event=stop_event, include_home=True, reset_session=True
+              driver, url, stop_event=stop_event, include_home=False, reset_session=True
             )
           else:
-            driver.get(AVITO_BASE_URL)
-            if not wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT, stop_event):
-              print("[AVITO] Домашняя страница Avito не успела прогрузиться после блокировки.")
-            _sleep_with_stop(stop_event, random.uniform(2.0, 4.5))
             driver.get(url)
           if not wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT, stop_event):
             print("[AVITO] После перезахода при блокировке document.readyState не готов — пробую дальше.")
@@ -3663,7 +3656,7 @@ def parse_avito(
         try:
           if page == 1:
             _open_avito_with_soft_entry(
-              driver, url, stop_event=stop_event, include_home=True, reset_session=False
+              driver, url, stop_event=stop_event, include_home=False, reset_session=False
             )
           else:
             driver.get(url)
@@ -3705,7 +3698,7 @@ def parse_avito(
       _log_avito_empty_page_probe(driver)
       blocked_after_probe, blocked_reason_after_probe = _is_avito_blocked(driver)
       if blocked_after_probe:
-        soft_wait = float(AVITO_BLOCK_RETRY_WAIT_SEC) + random.uniform(18.0, 45.0)
+        soft_wait = random.uniform(120.0, 140.0)
         print(
           f"[AVITO] После probe обнаружена блокировка ({blocked_reason_after_probe}). "
           f"Жду {int(soft_wait)} сек и мягко перезахожу на страницу…"
