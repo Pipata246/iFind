@@ -1108,15 +1108,32 @@ def _js_click_filter_option(driver, raw_text: str, mode: str) -> bool:
           return false;
         }
         if (mode === 'sim') {
+          var want1 = /(^|[^0-9])1([^0-9]|$)/.test(needle);
+          var want2 = /(^|[^0-9])2([^0-9]|$)/.test(needle);
           for (var s = 0; s < nodes.length; s++) {
             var ts = nodes[s].t;
             if (ts.indexOf('sim') === -1 && ts.indexOf('сим') === -1 && ts.indexOf('nano') === -1) continue;
+            // Строгое соответствие количества SIM (1/2), если оно задано пользователем.
+            if (want1) {
+              if (!/(^|[^0-9])1([^0-9]|$)/.test(ts)) continue;
+              if (ts.indexOf('esim') !== -1 || ts.indexOf('+') !== -1) continue;
+            }
+            if (want2) {
+              if (!/(^|[^0-9])2([^0-9]|$)/.test(ts)) continue;
+            }
             if (needle.length >= 2 && (ts.indexOf(needle) !== -1 || needle.indexOf(ts) !== -1)) {
               if (clickSmart(nodes[s].el)) return true;
             }
           }
           for (var s2 = 0; s2 < nodes.length; s2++) {
             var ts2 = nodes[s2].t;
+            if (want1) {
+              if (!/(^|[^0-9])1([^0-9]|$)/.test(ts2)) continue;
+              if (ts2.indexOf('esim') !== -1 || ts2.indexOf('+') !== -1) continue;
+            }
+            if (want2) {
+              if (!/(^|[^0-9])2([^0-9]|$)/.test(ts2)) continue;
+            }
             if (ts2.indexOf(needle) !== -1 && ts2.length < 48) {
               if (clickSmart(nodes[s2].el)) return true;
             }
@@ -1449,41 +1466,51 @@ def _sim_variants(value):
     return []
   variants = [raw, raw.replace("ё", "е"), raw.replace("е", "ё")]
   low = raw.lower().replace("ё", "е")
+
+  wants_1 = bool(re.search(r"\b1\b", low))
+  wants_2 = bool(re.search(r"\b2\b", low))
+
+  # Строгий режим: если пользователь просит 1 SIM/2 SIM, не подмешиваем
+  # универсальные варианты (SIM, nano-SIM + eSIM), чтобы не кликнуть не то.
+  if wants_1:
+    variants.extend(
+      [
+        "1 SIM",
+        "1 sim",
+        "1SIM",
+        "1 SIM-карта",
+        "1 nano-SIM",
+        "1 nano sim",
+        "одна SIM",
+        "1 физическая SIM",
+      ]
+    )
+    return _uniq_strings(variants)
+
+  if wants_2:
+    variants.extend(
+      [
+        "2 SIM",
+        "2 sim",
+        "2SIM",
+        "dual SIM",
+        "две SIM",
+      ]
+    )
+    return _uniq_strings(variants)
+
+  # Нестрогий режим только если не задано количество SIM.
   variants.extend(
     [
       raw.replace(" ", ""),
       raw.upper(),
       raw.lower(),
-      "1 SIM",
-      "1 sim",
-      "1SIM",
       "SIM",
       "sim",
-      "1 nano-SIM",
       "nano-SIM + eSIM",
-      "2 SIM",
-      "2 sim",
-      "2SIM",
+      "eSIM",
     ]
   )
-  if "1" in low or re.search(r"\b1\b", raw):
-    variants.extend(
-      [
-        "1 SIM",
-        "1 sim",
-        "1sim",
-        "SIM",
-        "1 SIM-карта",
-        "1 SIM",
-        "1 nano-SIM",
-        "1 nano sim",
-        "Nano-SIM",
-        "одна SIM",
-        "1 физическая SIM",
-      ]
-    )
-  if "2" in low or re.search(r"\b2\b", raw):
-    variants.extend(["2 SIM", "2 sim", "2SIM"])
   return _uniq_strings(variants)
 
 
