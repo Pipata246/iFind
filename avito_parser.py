@@ -461,9 +461,8 @@ def _open_avito_with_soft_entry(driver, target_url: str, stop_event=None, includ
   for idx, u in enumerate(ordered_steps):
     opened = False
     # Каждый шаг входа пробуем ограниченно, чтобы не зависать на одном URL.
-    # Главную Avito пробуем более агрессивно: она чаще всего ловит ECONNRESET/anti-bot.
     is_home_step = include_home and (u.rstrip("/") == (AVITO_BASE_URL or "").rstrip("/"))
-    max_step_tries = 5 if is_home_step else 2
+    max_step_tries = 2
     for step_try in range(1, max_step_tries + 1):
       try:
         _sleep_with_stop(stop_event, random.uniform(0.25, 0.95))
@@ -476,11 +475,6 @@ def _open_avito_with_soft_entry(driver, target_url: str, stop_event=None, includ
           _try_accept_avito_consent(driver)
           sleep(0.6)
 
-        # Если попали в блокировку/проверку — пробуем ещё раз (раньше это приводило к дальнейшему fallthrough).
-        blocked, _reason = _is_avito_blocked(driver)
-        if blocked:
-          raise RuntimeError(f"Avito blocked after step open: {_reason or 'blocked'}")
-
         opened = True
         break
       except Exception as e:
@@ -490,32 +484,20 @@ def _open_avito_with_soft_entry(driver, target_url: str, stop_event=None, includ
         print(
           f"[AVITO] Шаг мягкого входа не открылся ({u}) попытка {step_try}/{max_step_tries}: {e}"
         )
-        # Если заблокировало именно на входе в главную — ждём ротацию IP у моб. прокси,
-        # иначе мы снова повторим попытку на том же заблокированном IP.
-        if is_home_step and (
-          "blocked after step open" in str(e).lower()
-          or "доступ ограничен" in str(e).lower()
-          or "доступ с вашего ip" in str(e).lower()
-          or "captcha" in str(e).lower()
-        ):
-          wait_block_sec = float(AVITO_BLOCK_RETRY_WAIT_SEC) + random.uniform(0.0, 15.0)
-          print(f"[AVITO] Жду ротацию IP после блокировки на главной: {int(wait_block_sec)} сек…")
-          _sleep_with_stop(stop_event, wait_block_sec)
-        else:
-          # Лёгкий fallback: если шаг (не home) упал — возвращаемся на главную и пробуем снова.
-          # Это полезно, когда SPA/сервер отдаёт разные редиректы.
-          try:
-            if not is_home_step:
-              driver.get(AVITO_BASE_URL)
-              wait_for_document_ready(driver, step_ready_timeout, stop_event)
-              if include_home:
-                _try_accept_avito_consent(driver)
-                sleep(0.6)
-          except Exception:
-            pass
+        # Лёгкий fallback: если шаг (не home) упал — возвращаемся на главную и пробуем снова.
+        # Это полезно, когда SPA/сервер отдаёт разные редиректы.
+        try:
+          if not is_home_step:
+            driver.get(AVITO_BASE_URL)
+            wait_for_document_ready(driver, step_ready_timeout, stop_event)
+            if include_home:
+              _try_accept_avito_consent(driver)
+              sleep(0.6)
+        except Exception:
+          pass
 
-          # Подождём перед повтором: при ECONNRESET бывает "вторая попытка" успешнее.
-          _sleep_with_stop(stop_event, random.uniform(3.0, 7.0))
+        # Подождём перед повтором: при ECONNRESET бывает "вторая попытка" успешнее.
+        _sleep_with_stop(stop_event, random.uniform(3.0, 7.0))
 
     if not opened:
       raise TimeoutException(f"Не удалось открыть шаг мягкого входа: {u}")
