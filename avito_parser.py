@@ -3372,9 +3372,11 @@ def parse_avito(
         try:
           if page == 1:
             print("[AVITO] Вход на выдачу: только прямой переход на целевой URL…")
-            _sleep_with_stop(stop_event, random.uniform(1.0, 2.0))
+            _sleep_with_stop(stop_event, random.uniform(2.0, 5.0))
             driver.get(url)
           else:
+            # Мягче открываем следующие страницы, чтобы снизить частоту блокировок.
+            _sleep_with_stop(stop_event, random.uniform(1.8, 4.2))
             if prefer_ui_pagination and _try_click_avito_pagination_page(driver, page, stop_event):
               print(
                 f"[AVITO] Страница {page}: открыта кликом по пагинации "
@@ -3431,7 +3433,7 @@ def parse_avito(
           break
 
       delay_after_load = (
-        random.uniform(10.0, 18.0) if page == 1 else random.uniform(load_delay * 0.8, load_delay * 1.2)
+        random.uniform(12.0, 24.0) if page == 1 else random.uniform(max(7.0, load_delay * 0.9), max(12.0, load_delay * 1.4))
       )
       print(f"[AVITO] Ожидание {delay_after_load:.0f} сек после загрузки…")
       _sleep_with_stop(stop_event, delay_after_load)
