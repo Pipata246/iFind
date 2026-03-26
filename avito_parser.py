@@ -3905,6 +3905,13 @@ def parse_avito(
     used_html_fallback = False
     if cards:
       print(f"[AVITO] Страница {page}: найдено карточек {len(cards)}")
+    # Основной быстрый путь: парсинг page_source через BS4.
+    items = _parse_cards_from_html(driver)
+    if items:
+      used_html_fallback = True
+      print(f"[AVITO] Страница {page}: HTML-разбор, найдено {len(items)} карточек")
+    elif cards:
+      # Редкий fallback: если HTML не дал карточек, пробуем DOM-парсер Selenium.
       items, page_stats = _parse_cards_to_items(cards, city, price_min, price_max)
       print(
         f"[AVITO] Страница {page}: parsed={page_stats['parsed_ok']}/{page_stats['cards_total']}, "
