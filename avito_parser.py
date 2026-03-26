@@ -3367,7 +3367,8 @@ def parse_avito(
           print(f"[AVITO] status_callback: {e}")
 
       loaded = False
-      for attempt in range(1, 4):
+      open_try_max = 1 if page == 1 else 3
+      for attempt in range(1, open_try_max + 1):
         try:
           if page == 1:
             print("[AVITO] Вход на выдачу: только прямой переход на целевой URL…")
@@ -3390,17 +3391,17 @@ def parse_avito(
           loaded = True
           break
         except TimeoutException:
-          print(f"[AVITO] Таймаут загрузки (попытка {attempt}/3). Пауза 10 сек…")
+          print(f"[AVITO] Таймаут загрузки (попытка {attempt}/{open_try_max}). Пауза 10 сек…")
           _sleep_with_stop(stop_event, 10)
         except (WebDriverException, OSError, Exception) as e:
           err = str(e).lower()
           if "connection" in err or "reset" in err or "10054" in err or "econnreset" in err or "tcp" in err:
-            print(f"[AVITO] Обрыв соединения с прокси/сайтом (попытка {attempt}/3). Пауза 10 сек…")
+            print(f"[AVITO] Обрыв соединения с прокси/сайтом (попытка {attempt}/{open_try_max}). Пауза 10 сек…")
           else:
             print(f"[AVITO] Ошибка загрузки: {e}")
           _sleep_with_stop(stop_event, 10)
       if not loaded:
-        print("[AVITO] Не удалось загрузить страницу после 3 попыток. Проверьте прокси и сеть.")
+        print(f"[AVITO] Не удалось загрузить страницу после {open_try_max} попыток. Проверьте прокси и сеть.")
         abort_page_loop = True
         break
 
@@ -3429,7 +3430,9 @@ def parse_avito(
           abort_page_loop = True
           break
 
-      delay_after_load = random.uniform(load_delay * 0.8, load_delay * 1.2)
+      delay_after_load = (
+        random.uniform(10.0, 18.0) if page == 1 else random.uniform(load_delay * 0.8, load_delay * 1.2)
+      )
       print(f"[AVITO] Ожидание {delay_after_load:.0f} сек после загрузки…")
       _sleep_with_stop(stop_event, delay_after_load)
 
@@ -3457,7 +3460,7 @@ def parse_avito(
           break
         transport_failures_on_page += 1
         # Транспортный сбой != блокировка Avito: не ждём слишком долго, пробуем быстрее восстановиться.
-        transport_wait = random.uniform(8.0, 20.0)
+        transport_wait = random.uniform(90.0, 130.0) if page == 1 else random.uniform(8.0, 20.0)
         print(
           f"[AVITO] Транспортная ошибка сети/прокси ({t_reason}). "
           f"Жду {int(transport_wait)} сек и пробую на текущей сессии…"
@@ -3476,7 +3479,7 @@ def parse_avito(
             print(f"[AVITO] status_callback: {e}")
         _sleep_with_stop(stop_event, transport_wait)
         # Не пересоздаём сессию сразу: сохраняем рабочий IP/сессию, если она ещё жива.
-        if transport_failures_on_page >= 2 and driver_recreate_callback is not None:
+        if page > 1 and transport_failures_on_page >= 2 and driver_recreate_callback is not None:
           try:
             new_driver = driver_recreate_callback()
             if new_driver is not None:
@@ -3629,7 +3632,7 @@ def parse_avito(
       transport_dom, transport_reason_dom = _detect_avito_transport_issue(driver)
       if transport_dom:
         transport_failures_on_page += 1
-        transport_wait = random.uniform(8.0, 20.0)
+        transport_wait = random.uniform(90.0, 130.0) if page == 1 else random.uniform(8.0, 20.0)
         print(
           f"[AVITO] В DOM-цикле транспортная ошибка ({transport_reason_dom}). "
           f"Жду {int(transport_wait)} сек и пробую на текущей сессии…"
@@ -3647,7 +3650,7 @@ def parse_avito(
           except Exception as e:
             print(f"[AVITO] status_callback: {e}")
         _sleep_with_stop(stop_event, transport_wait)
-        if transport_failures_on_page >= 2 and driver_recreate_callback is not None:
+        if page > 1 and transport_failures_on_page >= 2 and driver_recreate_callback is not None:
           try:
             new_driver = driver_recreate_callback()
             if new_driver is not None:
