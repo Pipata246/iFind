@@ -3344,11 +3344,16 @@ def parse_avito(
     # пауза между раундами — смена IP у мобильного прокси.
     abort_page_loop = False
     transport_failures_on_page = 0
-    for block_round in range(1, AVITO_BLOCK_MAX_RETRIES_PER_PAGE + 1):
+    unlimited_entry_mode = (page == 1 and not all_items)
+    max_rounds_for_page = None if unlimited_entry_mode else AVITO_BLOCK_MAX_RETRIES_PER_PAGE
+    block_round = 0
+    while True:
+      block_round += 1
+      rounds_label = "∞" if max_rounds_for_page is None else str(max_rounds_for_page)
       if block_round > 1:
         print(
           f"[AVITO] Страница {page}: повтор после блокировки — раунд {block_round}/"
-          f"{AVITO_BLOCK_MAX_RETRIES_PER_PAGE} (ожидание смены IP)…"
+          f"{rounds_label} (ожидание смены IP)…"
         )
       else:
         print(f"[AVITO] Страница {page}/{max_pages}: загрузка…")
@@ -3360,20 +3365,38 @@ def parse_avito(
               "page": int(page),
               "pages_to_parse": int(max_pages),
               "block_round": int(block_round),
-              "block_round_max": int(AVITO_BLOCK_MAX_RETRIES_PER_PAGE),
+              "block_round_max": int(max_rounds_for_page or 0),
             }
           )
         except Exception as e:
           print(f"[AVITO] status_callback: {e}")
 
       loaded = False
-      open_try_max = 1 if page == 1 else 3
+      open_try_max = 2 if page == 1 else 3
       for attempt in range(1, open_try_max + 1):
         try:
           if page == 1:
-            print("[AVITO] Вход на выдачу: только прямой переход на целевой URL…")
-            _sleep_with_stop(stop_event, random.uniform(2.0, 5.0))
-            driver.get(url)
+            # Чередуем мягкие сценарии входа, чтобы не стучаться всегда одним паттерном.
+            strategy = (block_round + attempt) % 3
+            if strategy == 0:
+              print("[AVITO] Вход на выдачу: прямой переход на целевой URL…")
+              _sleep_with_stop(stop_event, random.uniform(2.0, 5.0))
+              driver.get(url)
+            elif strategy == 1:
+              print("[AVITO] Вход на выдачу: прогрев через главную, затем целевой URL…")
+              _sleep_with_stop(stop_event, random.uniform(3.0, 7.0))
+              driver.get("https://www.avito.ru/")
+              if wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT, stop_event):
+                _sleep_with_stop(stop_event, random.uniform(4.0, 9.0))
+              driver.get(url)
+            else:
+              print("[AVITO] Вход на выдачу: прогрев через безопасный поиск, затем целевой URL…")
+              _sleep_with_stop(stop_event, random.uniform(3.0, 7.0))
+              warmup_url = build_avito_search_url(keyword, model, city, price_min, price_max, page=1, filters={})
+              driver.get(warmup_url)
+              if wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT, stop_event):
+                _sleep_with_stop(stop_event, random.uniform(4.0, 8.0))
+              driver.get(url)
           else:
             # Мягче открываем следующие страницы, чтобы снизить частоту блокировок.
             _sleep_with_stop(stop_event, random.uniform(1.8, 4.2))
@@ -3404,6 +3427,14 @@ def parse_avito(
           _sleep_with_stop(stop_event, 10)
       if not loaded:
         print(f"[AVITO] Не удалось загрузить страницу после {open_try_max} попыток. Проверьте прокси и сеть.")
+        if unlimited_entry_mode:
+          cooldown_sec = random.uniform(90.0, 180.0)
+          print(
+            f"[AVITO] Первая страница всё ещё не открылась. "
+            f"Делаю охлаждение {int(cooldown_sec)} сек и пробую следующий сценарий…"
+          )
+          _sleep_with_stop(stop_event, cooldown_sec)
+          continue
         abort_page_loop = True
         break
 
@@ -3422,10 +3453,11 @@ def parse_avito(
           print(f"[AVITO] Повторный переход на p={page} не удался: {e}")
         current_url = (driver.current_url or "").lower()
         if f"p={page}" not in current_url:
-          if block_round < AVITO_BLOCK_MAX_RETRIES_PER_PAGE:
+          can_retry_round = (max_rounds_for_page is None) or (block_round < max_rounds_for_page)
+          if can_retry_round:
             print(
               f"[AVITO] p={page} всё ещё не открылась. Перехожу к следующему раунду "
-              f"{block_round + 1}/{AVITO_BLOCK_MAX_RETRIES_PER_PAGE}."
+              f"{block_round + 1}/{rounds_label}."
             )
             continue
           print("[AVITO] Не удалось открыть нужную страницу после всех раундов.")
@@ -3495,6 +3527,15 @@ def parse_avito(
             print(f"[AVITO] Ошибка пересоздания driver: {e}")
         # Если транспорт разваливается подряд, не тратим 20+ минут на бесполезные циклы.
         if transport_failures_on_page >= 3:
+          if unlimited_entry_mode:
+            cooldown_sec = random.uniform(140.0, 260.0)
+            print(
+              "[AVITO] Много транспортных сбоев подряд на первой странице. "
+              f"Делаю длинное охлаждение {int(cooldown_sec)} сек и продолжаю попытки."
+            )
+            transport_failures_on_page = 0
+            _sleep_with_stop(stop_event, cooldown_sec)
+            continue
           print(
             "[AVITO] Много транспортных сбоев подряд на странице. "
             "Прерываю страницу раньше, чтобы запуск завершался быстрее и стабильнее."
@@ -3513,17 +3554,20 @@ def parse_avito(
               "page": int(page),
               "reason": str(reason or ""),
               "block_round": int(block_round),
-              "block_round_max": int(AVITO_BLOCK_MAX_RETRIES_PER_PAGE),
+              "block_round_max": int(max_rounds_for_page or 0),
             }
           )
         except Exception as e:
           print(f"[AVITO] status_callback: {e}")
-      wait_block_sec = random.uniform(120.0, 140.0)
+      # Каждые 3 неудачных раунда добавляем длинное охлаждение, чтобы дождаться новой IP-сессии.
+      wait_block_sec = random.uniform(120.0, 160.0)
+      if block_round % 3 == 0:
+        wait_block_sec = random.uniform(190.0, 320.0)
       print(
-        f"[AVITO] Попытка {block_round}/{AVITO_BLOCK_MAX_RETRIES_PER_PAGE} на странице {page}. "
-        f"Пауза {int(wait_block_sec)} сек (новый IP у прокси), затем снова driver.get…"
+        f"[AVITO] Попытка {block_round}/{rounds_label} на странице {page}. "
+        f"Пауза {int(wait_block_sec)} сек (новый IP у прокси), затем новый сценарий входа…"
       )
-      if block_round >= AVITO_BLOCK_MAX_RETRIES_PER_PAGE:
+      if max_rounds_for_page is not None and block_round >= max_rounds_for_page:
         if status_callback:
           try:
             status_callback(
@@ -3553,7 +3597,7 @@ def parse_avito(
               "page": int(page),
                 "wait_sec": int(wait_block_sec),
               "next_round": int(block_round + 1),
-              "block_round_max": int(AVITO_BLOCK_MAX_RETRIES_PER_PAGE),
+              "block_round_max": int(max_rounds_for_page or 0),
             }
           )
         except Exception as e:
