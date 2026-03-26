@@ -13,6 +13,9 @@ BASE_HEADERS = [
 ]
 
 AVITO_FILTER_HEADERS = [
+  "avito_filter_price_min",
+  "avito_filter_price_max",
+  "avito_filter_today_only",
   "avito_filter_memory",
   "avito_filter_colors",
   "avito_filter_seller_type",

@@ -81,10 +81,21 @@ def _resolve_avito_iphone_apple_segment(keyword: str, model: str) -> str | None:
   return None
 
 
-def _filters_to_excel_meta(filters, *, applied_mode: str = "", ui_applied_note: str = ""):
+def _filters_to_excel_meta(
+  filters,
+  *,
+  applied_mode: str = "",
+  ui_applied_note: str = "",
+  today_only: bool = False,
+  price_min=None,
+  price_max=None,
+):
   """Запрос пользователя + как реально отобрали (быстрый режим по выдаче)."""
   filters = filters or {}
   return {
+    "avito_filter_price_min": price_min if price_min is not None else "",
+    "avito_filter_price_max": price_max if price_max is not None else "",
+    "avito_filter_today_only": "yes" if today_only else "no",
     "avito_filter_memory": ", ".join(filters.get("memory", [])),
     "avito_filter_colors": ", ".join(filters.get("colors", [])),
     "avito_filter_seller_type": (filters.get("seller_type") or "all"),
@@ -3254,7 +3265,12 @@ def parse_avito(
 
   all_items = []
   page = 1
-  filter_meta = _filters_to_excel_meta(filters)
+  filter_meta = _filters_to_excel_meta(
+    filters,
+    today_only=bool(today_only),
+    price_min=price_min,
+    price_max=price_max,
+  )
   ui_applied = {}
   seen_item_keys = set()
   filtered_base_url = ""
@@ -4087,7 +4103,14 @@ def parse_avito(
 
   text_fallback_ran = False
   mode, mode_note = ("fast_listing", "Отбор по выдаче: price + memory + colors + today_only + seller + rating")
-  final_meta = _filters_to_excel_meta(filters, applied_mode=mode, ui_applied_note=mode_note)
+  final_meta = _filters_to_excel_meta(
+    filters,
+    applied_mode=mode,
+    ui_applied_note=mode_note,
+    today_only=bool(today_only),
+    price_min=price_min,
+    price_max=price_max,
+  )
   for item in all_items:
     item.update(final_meta)
 
