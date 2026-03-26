@@ -2,6 +2,7 @@ import argparse
 import logging
 import os
 import random
+import shutil
 import time
 
 from seleniumwire import webdriver
@@ -125,6 +126,29 @@ def build_driver(headless=True):
   if headless:
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--disable-gpu")
+
+  # На VPS браузер может быть установлен как google-chrome ИЛИ chromium.
+  # Поддерживаем явный CHROME_BINARY и авто-поиск, чтобы не падать с
+  # "no chrome binary at /usr/bin/google-chrome".
+  chrome_binary = (os.getenv("CHROME_BINARY") or "").strip()
+  if not chrome_binary:
+    for candidate in (
+      shutil.which("google-chrome"),
+      shutil.which("google-chrome-stable"),
+      shutil.which("chromium"),
+      shutil.which("chromium-browser"),
+      "/usr/bin/google-chrome",
+      "/usr/bin/google-chrome-stable",
+      "/usr/bin/chromium",
+      "/usr/bin/chromium-browser",
+      "/snap/bin/chromium",
+    ):
+      if candidate and os.path.exists(candidate):
+        chrome_binary = candidate
+        break
+  if chrome_binary:
+    chrome_options.binary_location = chrome_binary
+    print(f"[Driver] Chrome binary: {chrome_binary}")
 
   use_proxy = USE_MOBILE_PROXY and MOBILE_PROXY_HOST and str(MOBILE_PROXY_HOST).strip()
 
