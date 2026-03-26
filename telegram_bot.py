@@ -231,7 +231,12 @@ async def _emit_avito_parse_status(
     page = int(payload.get("page") or 1)
     pages = int(payload.get("pages_to_parse") or 1)
     await update.message.reply_text(
-      f"📄 Открываю страницу {page}/{pages}.\n🔎 Собираю данные…",
+      f"📄 Открываю страницу {page}/{pages}.",
+      reply_markup=build_stop_keyboard(),
+    )
+  elif phase == "dom_wait":
+    await update.message.reply_text(
+      "🔎 Собираю данные…",
       reply_markup=build_stop_keyboard(),
     )
   elif phase == "page_parsed":
@@ -478,7 +483,7 @@ async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFA
 
       def _status_callback(payload: dict):
         ph = payload.get("phase")
-        if ph not in ("page_loading", "page_parsed", "parse_finished"):
+        if ph not in ("page_loading", "dom_wait", "page_parsed", "parse_finished"):
           return
         # Снижаем шум: отправляем только ключевые этапы и редкие обновления.
         if ph == "page_loading":
@@ -491,6 +496,11 @@ async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFA
           if status_state["last_page_loading_key"] == key:
             return
           status_state["last_page_loading_key"] = key
+        elif ph == "dom_wait":
+          page = int(payload.get("page") or 1)
+          if status_state["last_dom_wait_page"] == page:
+            return
+          status_state["last_dom_wait_page"] = page
         _notify(payload)
 
       def _recreate_driver():

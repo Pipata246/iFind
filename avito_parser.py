@@ -676,15 +676,15 @@ def build_avito_search_url(keyword, model, city, price_min, price_max, page=1, f
     segment = _resolve_avito_iphone_apple_segment(keyword, model)
     params = []
     if price_min is not None:
-      params.append(f"pmin={price_min}")
+      params.append(("pmin", str(price_min)))
     if price_max is not None:
-      params.append(f"pmax={price_max}")
+      params.append(("pmax", str(price_max)))
     if page > 1:
-      params.append(f"p={page}")
-    params.append("cd=1")
+      params.append(("p", str(page)))
+    params.append(("cd", "1"))
     if segment:
       path = f"{base}/telefony/mobilnye_telefony/apple/{segment}"
-      return f"{path}?{'&'.join(params)}"
+      return f"{path}?{urlencode(params)}"
     q_parts = []
     if keyword:
       q_parts.append(keyword)
@@ -692,35 +692,36 @@ def build_avito_search_url(keyword, model, city, price_min, price_max, page=1, f
       q_parts.append(model)
     params_q = []
     if q_parts:
-      params_q.append(f"q={'+'.join(q_parts)}")
+      params_q.append(("q", " ".join(q_parts)))
     if price_min is not None:
-      params_q.append(f"pmin={price_min}")
+      params_q.append(("pmin", str(price_min)))
     if price_max is not None:
-      params_q.append(f"pmax={price_max}")
+      params_q.append(("pmax", str(price_max)))
     if page > 1:
-      params_q.append(f"p={page}")
-    params_q.append("cd=1")
-    return f"{base}/?{'&'.join(params_q)}" if params_q else base
+      params_q.append(("p", str(page)))
+    params_q.append(("cd", "1"))
+    return f"{base}/?{urlencode(params_q)}" if params_q else base
 
   q_parts = []
   if keyword:
     q_parts.append(keyword)
   if model:
     q_parts.append(model)
-  q = "+".join(q_parts) if q_parts else ""
+  q = " ".join(q_parts) if q_parts else ""
 
   params = []
   if q:
-    params.append(f"q={q}")
+    params.append(("q", q))
   if price_min is not None:
-    params.append(f"pmin={price_min}")
+    params.append(("pmin", str(price_min)))
   if price_max is not None:
-    params.append(f"pmax={price_max}")
+    params.append(("pmax", str(price_max)))
   if page > 1:
-    params.append(f"p={page}")
+    params.append(("p", str(page)))
+  params.append(("cd", "1"))
 
   if params:
-    return f"{base}/?{'&'.join(params)}"
+    return f"{base}/?{urlencode(params)}"
   return base
 
 
