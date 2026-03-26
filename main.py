@@ -2,10 +2,7 @@ import argparse
 import logging
 import os
 import random
-import shutil
-import tempfile
 import time
-import uuid
 
 from seleniumwire import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -125,68 +122,6 @@ def build_driver(headless=True):
   chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
   chrome_options.add_experimental_option("useAutomationExtension", False)
 
-  # На Linux/VPS webdriver-manager и Selenium Manager не всегда определяют бинарник сами.
-  chrome_binary = os.getenv("CHROME_BINARY")
-  if not chrome_binary:
-    for candidate in (
-      "/usr/bin/google-chrome",
-      "/usr/bin/google-chrome-stable",
-      "/usr/bin/chromium",
-      "/usr/bin/chromium-browser",
-    ):
-      if os.path.exists(candidate):
-        chrome_binary = candidate
-        break
-  if chrome_binary:
-    chrome_options.binary_location = chrome_binary
-
-  # Фикс для VPS: у Chrome может падать старт с "cannot create default profile directory"
-  # из-за проблем с правами/путями tmp. Делаем устойчивую runtime-структуру с fallback.
-  runtime_root = os.getenv("CHROME_RUNTIME_DIR")
-  if not runtime_root:
-    runtime_root = os.path.join(tempfile.gettempdir(), f"ifind-chrome-{os.getuid()}")
-  try:
-    os.makedirs(runtime_root, exist_ok=True)
-    os.chmod(runtime_root, 0o700)
-  except Exception:
-    runtime_root = tempfile.mkdtemp(prefix="ifind-chrome-")
-    try:
-      os.chmod(runtime_root, 0o700)
-    except Exception:
-      pass
-
-  tmp_root = os.path.join(runtime_root, "tmp")
-  profile_root = os.path.join(runtime_root, "profiles")
-  cache_root = os.path.join(runtime_root, "cache")
-  xdg_runtime = os.path.join(runtime_root, "xdg")
-  os.makedirs(tmp_root, exist_ok=True)
-  os.makedirs(profile_root, exist_ok=True)
-  os.makedirs(cache_root, exist_ok=True)
-  os.makedirs(xdg_runtime, exist_ok=True)
-  for d in (tmp_root, profile_root, cache_root, xdg_runtime):
-    try:
-      os.chmod(d, 0o700)
-    except Exception:
-      pass
-
-  os.environ.setdefault("TMPDIR", tmp_root)
-  os.environ.setdefault("TMP", tmp_root)
-  os.environ.setdefault("TEMP", tmp_root)
-  os.environ.setdefault("XDG_RUNTIME_DIR", xdg_runtime)
-
-  profile_dir = tempfile.mkdtemp(prefix="selenium-", dir=profile_root)
-  try:
-    os.chmod(profile_dir, 0o700)
-  except Exception:
-    pass
-  chrome_options.add_argument(f"--user-data-dir={profile_dir}")
-  chrome_options.add_argument(f"--disk-cache-dir={cache_root}")
-  chrome_options.add_argument(f"--crash-dumps-dir={tmp_root}")
-  chrome_options.add_argument(f"--data-path={runtime_root}")
-  chrome_options.add_argument("--no-first-run")
-  chrome_options.add_argument("--no-default-browser-check")
-  chrome_options.add_argument("--remote-debugging-port=0")
-
   if headless:
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--disable-gpu")
@@ -253,20 +188,6 @@ def build_driver(headless=True):
     print(f"[Прокси] Используется мобильный прокси: {MOBILE_PROXY_HOST}:{MOBILE_PROXY_PORT}")
   else:
     print("[Прокси] Прокси отключен: используется IP VPS.")
-
-  # Освобождаем временный профиль после закрытия браузера.
-  original_quit = driver.quit
-
-  def _quit_with_cleanup():
-    try:
-      original_quit()
-    finally:
-      try:
-        shutil.rmtree(profile_dir, ignore_errors=True)
-      except Exception:
-        pass
-
-  driver.quit = _quit_with_cleanup
   return driver
 
 
