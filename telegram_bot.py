@@ -218,132 +218,34 @@ def _format_avito_ready_bot_message(payload: dict) -> str:
 async def _emit_avito_parse_status(
   update: Update, payload: dict, stop_event: threading.Event | None = None
 ):
-  """Промежуточные статусы парсинга (синхронно с логами [AVITO])."""
+  """Минимальные статусы парсинга для Telegram (без спама)."""
   if stop_event is not None and stop_event.is_set():
     return
   phase = payload.get("phase")
-  if phase == "ready":
-    # Этап: вход в выдачу завершён.
+  if phase == "driver_ready":
     await update.message.reply_text(
-      "✅ Этап «Вход»: Avito открыт.\n" + _format_avito_ready_bot_message(payload),
-      reply_markup=build_stop_keyboard(),
-    )
-  elif phase == "driver_ready":
-    await update.message.reply_text(
-      "🚀 Этап «Вход»: запускаю браузер и пытаюсь зайти на Avito…",
-      reply_markup=build_stop_keyboard(),
-    )
-  elif phase == "applying_filters":
-    await update.message.reply_text(
-      "🎛️ Этап «Фильтры»: применяю фильтры в интерфейсе Avito…",
+      "🚀 Запуск парсинга…",
       reply_markup=build_stop_keyboard(),
     )
   elif phase == "page_loading":
     page = int(payload.get("page") or 1)
     pages = int(payload.get("pages_to_parse") or 1)
-    round_no = int(payload.get("block_round") or 1)
-    round_max = int(payload.get("block_round_max") or 3)
     await update.message.reply_text(
-      f"📄 Этап «Загрузка выдачи»: открываю страницу {page}/{pages} (попытка {round_no}/{round_max})…",
-      reply_markup=build_stop_keyboard(),
-    )
-  elif phase == "block_detected":
-    page = int(payload.get("page") or 1)
-    reason = str(payload.get("reason") or "unknown")
-    round_no = int(payload.get("block_round") or 1)
-    round_max = int(payload.get("block_round_max") or 3)
-    await update.message.reply_text(
-      f"⚠️ Этап входа не пройден: блокировка ({reason}) на странице {page}, попытка {round_no}/{round_max}.",
-      reply_markup=build_stop_keyboard(),
-    )
-  elif phase == "block_retry_wait":
-    page = int(payload.get("page") or 1)
-    wait_sec = int(payload.get("wait_sec") or 130)
-    next_round = int(payload.get("next_round") or 2)
-    round_max = int(payload.get("block_round_max") or 3)
-    await update.message.reply_text(
-      f"⏳ Жду {wait_sec} сек для нового IP (страница {page}), затем повтор {next_round}/{round_max}.",
-      reply_markup=build_stop_keyboard(),
-    )
-  elif phase == "ui_filters_unavailable":
-    page = int(payload.get("page") or 1)
-    await update.message.reply_text(
-      f"⚠️ Этап «Фильтры»: на странице {page} не вижу панель фильтров. "
-      "Пробую запасной сценарий.",
-      reply_markup=build_stop_keyboard(),
-    )
-  elif phase == "block_give_up":
-    page = int(payload.get("page") or 1)
-    reason = str(payload.get("reason") or "unknown")
-    cnt = int(payload.get("collected_items") or 0)
-    await update.message.reply_text(
-      f"❌ На странице {page} не удалось обойти блокировку ({reason}). "
-      f"Завершаю текущий запуск с уже собранными объявлениями: {cnt}.",
-      reply_markup=build_stop_keyboard(),
-    )
-  elif phase == "dom_wait":
-    page = int(payload.get("page") or 1)
-    need_filters = bool(payload.get("need_filters_panel"))
-    tries = int(payload.get("dom_try_max") or 5)
-    msg = (
-      f"🔎 Этап «Проверка DOM»: проверяю, что открылась выдача и фильтры (до {tries} попыток)…"
-      if need_filters
-      else f"🔎 Этап «Проверка DOM»: проверяю, что открылась выдача (до {tries} попыток)…"
-    )
-    await update.message.reply_text(msg, reply_markup=build_stop_keyboard())
-  elif phase == "dom_retry":
-    page = int(payload.get("page") or 1)
-    dom_try = int(payload.get("dom_try") or 1)
-    dom_try_max = int(payload.get("dom_try_max") or 5)
-    cards_ok = bool(payload.get("cards_ok"))
-    filters_ok = bool(payload.get("filters_panel_ok"))
-    await update.message.reply_text(
-      f"DOM не готов на странице {page}: попытка {dom_try}/{dom_try_max} "
-      f"(cards={'ok' if cards_ok else 'none'}, filters={'ok' if filters_ok else 'none'}). Перезахожу…",
-      reply_markup=build_stop_keyboard(),
-    )
-  elif phase == "filters_retry":
-    page = int(payload.get("page") or 1)
-    apply_try = int(payload.get("apply_try") or 1)
-    apply_try_max = int(payload.get("apply_try_max") or 3)
-    await update.message.reply_text(
-      f"Повторяю применение UI-фильтров на странице {page}: попытка {apply_try}/{apply_try_max}.",
-      reply_markup=build_stop_keyboard(),
-    )
-  elif phase == "filters_applied_url":
-    page = int(payload.get("page") or 1)
-    url = str(payload.get("url") or "")
-    await update.message.reply_text(
-      f"Фильтры подтверждены URL (страница {page}).\n{url}",
+      f"📄 Открываю страницу {page}/{pages}.\n🔎 Собираю данные…",
       reply_markup=build_stop_keyboard(),
     )
   elif phase == "page_parsed":
     page = int(payload.get("page") or 1)
     added = int(payload.get("added") or 0)
     total = int(payload.get("total_collected") or 0)
-    cards_seen = int(payload.get("cards_seen") or 0)
     await update.message.reply_text(
-      f"✅ Этап «Обработка страницы»: {page} — карточек {cards_seen}, добавлено {added}, всего {total}.",
+      f"✅ Страница {page}: собрал данных {added}; данных всего {total}.",
       reply_markup=build_stop_keyboard(),
     )
   elif phase == "parse_finished":
     total = int(payload.get("total_items") or 0)
     await update.message.reply_text(
-      f"📦 Этап «Завершение»: парсинг завершён. Всего объявлений: {total}. Готовлю Excel…",
-      reply_markup=build_stop_keyboard(),
-    )
-  elif phase == "transport_issue":
-    page = int(payload.get("page") or 1)
-    reason = str(payload.get("reason") or "network")
-    wait_sec = int(payload.get("wait_sec") or 130)
-    await update.message.reply_text(
-      f"🌐 Сетевая ошибка на странице {page} ({reason}). Жду {wait_sec} сек и восстанавливаю сессию…",
-      reply_markup=build_stop_keyboard(),
-    )
-  elif phase == "driver_recreated":
-    page = int(payload.get("page") or 1)
-    await update.message.reply_text(
-      f"🔁 Сессия браузера пересоздана (страница {page}). Продолжаю вход…",
+      f"📦 Парсинг завершён. Всего объявлений: {total}. Готовлю Excel…",
       reply_markup=build_stop_keyboard(),
     )
 
@@ -576,23 +478,7 @@ async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFA
 
       def _status_callback(payload: dict):
         ph = payload.get("phase")
-        if ph not in (
-          "ready",
-          "applying_filters",
-          "page_loading",
-          "block_detected",
-          "block_retry_wait",
-          "block_give_up",
-          "ui_filters_unavailable",
-          "dom_wait",
-          "dom_retry",
-          "filters_retry",
-          "filters_applied_url",
-          "page_parsed",
-          "parse_finished",
-          "transport_issue",
-          "driver_recreated",
-        ):
+        if ph not in ("page_loading", "page_parsed", "parse_finished"):
           return
         # Снижаем шум: отправляем только ключевые этапы и редкие обновления.
         if ph == "page_loading":
@@ -605,46 +491,6 @@ async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFA
           if status_state["last_page_loading_key"] == key:
             return
           status_state["last_page_loading_key"] = key
-        elif ph == "dom_wait":
-          page = int(payload.get("page") or 1)
-          if status_state["last_dom_wait_page"] == page:
-            return
-          status_state["last_dom_wait_page"] = page
-        elif ph == "dom_retry":
-          page = int(payload.get("page") or 1)
-          # Не спамим каждый DOM-ретрай: одно сообщение на страницу.
-          if status_state["last_dom_retry_page"] == page:
-            return
-          status_state["last_dom_retry_page"] = page
-        elif ph == "block_detected":
-          cap = int(status_state.get("block_telegram_cap") or 5)
-          if int(status_state.get("block_telegram_sent") or 0) >= cap:
-            return
-          page = int(payload.get("page") or 1)
-          round_no = int(payload.get("block_round") or 1)
-          key = (page, round_no)
-          if status_state["last_block_detected_key"] == key:
-            return
-          status_state["last_block_detected_key"] = key
-          status_state["block_telegram_sent"] = int(status_state.get("block_telegram_sent") or 0) + 1
-        elif ph == "block_retry_wait":
-          cap = int(status_state.get("block_telegram_cap") or 5)
-          if int(status_state.get("block_telegram_sent") or 0) >= cap:
-            return
-          page = int(payload.get("page") or 1)
-          next_round = int(payload.get("next_round") or 2)
-          key = (page, next_round)
-          if status_state["last_block_wait_key"] == key:
-            return
-          status_state["last_block_wait_key"] = key
-          status_state["block_telegram_sent"] = int(status_state.get("block_telegram_sent") or 0) + 1
-        elif ph == "filters_retry":
-          page = int(payload.get("page") or 1)
-          apply_try = int(payload.get("apply_try") or 1)
-          key = (page, apply_try)
-          if status_state["last_filters_retry_key"] == key:
-            return
-          status_state["last_filters_retry_key"] = key
         _notify(payload)
 
       def _recreate_driver():

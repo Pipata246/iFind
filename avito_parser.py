@@ -3006,6 +3006,33 @@ def _extract_card_date_text_selenium(card):
         return t
     except Exception:
       continue
+  # Fallback: на части вёрсток дата без явного data-marker, но есть в тексте карточки.
+  try:
+    blob = (card.text or "").strip()
+    t2 = _extract_relative_date_from_text(blob)
+    if t2:
+      return t2
+  except Exception:
+    pass
+  return ""
+
+
+def _extract_relative_date_from_text(text: str) -> str:
+  s = (text or "").strip().lower().replace("\u00a0", " ")
+  if not s:
+    return ""
+  # Ищем подпись времени так, как она обычно видна под описанием карточки.
+  patterns = [
+    r"\bсегодня\b",
+    r"\b\d+\s*(?:ч|ч\.|час|часа|часов)\s*назад\b",
+    r"\b\d+\s*(?:м|м\.|мин|мин\.|минута|минуты|минут)\s*назад\b",
+    r"\b\d+\s*(?:с|с\.|сек|сек\.|секунда|секунды|секунд)\s*назад\b",
+    r"\bвчера\b",
+  ]
+  for p in patterns:
+    m = re.search(p, s, re.I)
+    if m:
+      return m.group(0).strip()
   return ""
 
 
@@ -3082,7 +3109,7 @@ def _is_avito_today_text(text):
   if "сегодня" in s or "today" in s:
     return True
   # «N часов/минут/секунд назад» на Avito обычно означает сегодня
-  if re.search(r"\d+\s*(час|часа|часов|мин|минут|минуты|сек|секунд|секунды)", s):
+  if re.search(r"\d+\s*(ч|ч\.|час|часа|часов|м|м\.|мин|мин\.|минут|минуты|с|с\.|сек|сек\.|секунд|секунды)\s*назад?", s):
     return True
   return False
 
@@ -3129,6 +3156,11 @@ def _parse_cards_from_html(driver):
         "[class*='item-date']"
       )
       date_text = (date_tag.get_text(" ", strip=True) if date_tag else "") or ""
+      if not date_text:
+        try:
+          date_text = _extract_relative_date_from_text(container.get_text(" ", strip=True))
+        except Exception:
+          date_text = ""
       seller_tag = container.select_one("[data-marker*='seller'], [class*='seller'], [class*='iva-seller']")
       seller_text = (seller_tag.get_text(" ", strip=True) if seller_tag else "") or ""
       description_tag = container.select_one("[data-marker='item-description'], [class*='item-description'], [class*='iva-item-text']")
@@ -3424,10 +3456,10 @@ def parse_avito(
           break
         transport_failures_on_page += 1
         # Транспортный сбой != блокировка Avito: не ждём слишком долго, пробуем быстрее восстановиться.
-        transport_wait = random.uniform(35.0, 75.0)
+        transport_wait = random.uniform(8.0, 20.0)
         print(
           f"[AVITO] Транспортная ошибка сети/прокси ({t_reason}). "
-          f"Жду {int(transport_wait)} сек и пересоздаю сессию браузера…"
+          f"Жду {int(transport_wait)} сек и пробую на текущей сессии…"
         )
         if status_callback:
           try:
@@ -3442,7 +3474,8 @@ def parse_avito(
           except Exception as e:
             print(f"[AVITO] status_callback: {e}")
         _sleep_with_stop(stop_event, transport_wait)
-        if driver_recreate_callback is not None:
+        # Не пересоздаём сессию сразу: сохраняем рабочий IP/сессию, если она ещё жива.
+        if transport_failures_on_page >= 2 and driver_recreate_callback is not None:
           try:
             new_driver = driver_recreate_callback()
             if new_driver is not None:
@@ -3595,10 +3628,10 @@ def parse_avito(
       transport_dom, transport_reason_dom = _detect_avito_transport_issue(driver)
       if transport_dom:
         transport_failures_on_page += 1
-        transport_wait = random.uniform(35.0, 75.0)
+        transport_wait = random.uniform(8.0, 20.0)
         print(
           f"[AVITO] В DOM-цикле транспортная ошибка ({transport_reason_dom}). "
-          f"Жду {int(transport_wait)} сек и пересоздаю сессию браузера…"
+          f"Жду {int(transport_wait)} сек и пробую на текущей сессии…"
         )
         if status_callback:
           try:
@@ -3613,7 +3646,7 @@ def parse_avito(
           except Exception as e:
             print(f"[AVITO] status_callback: {e}")
         _sleep_with_stop(stop_event, transport_wait)
-        if driver_recreate_callback is not None:
+        if transport_failures_on_page >= 2 and driver_recreate_callback is not None:
           try:
             new_driver = driver_recreate_callback()
             if new_driver is not None:
