@@ -1,8 +1,10 @@
+import json
 import random
 import re
 import time
 from time import sleep
-from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qs, parse_qsl, quote, urlencode, urlparse, urlunparse
+from urllib.request import ProxyHandler, build_opener
 
 from bs4 import BeautifulSoup
 from selenium.common.exceptions import TimeoutException, WebDriverException
@@ -19,10 +21,21 @@ from config import (
   AVITO_DOM_WAIT_FILTERS_NEXT,
   AVITO_DOM_WAIT_SHELL_FIRST,
   AVITO_DOM_WAIT_SHELL_NEXT,
+  AVITO_ENTER_THROTTLE_MAX_SEC,
+  AVITO_ENTER_THROTTLE_MIN_SEC,
   AVITO_MAX_PAGES_PER_RUN,
+  AVITO_PAGES_BATCH_SIZE,
+  AVITO_COOLDOWN_AFTER_NEW_IP_SEC,
+  AVITO_WAIT_NEW_IP_POLL_SEC,
+  AVITO_WAIT_NEW_IP_TIMEOUT_SEC,
   DOCUMENT_READY_TIMEOUT,
   EXPLICIT_WAIT,
   IMPLICIT_WAIT,
+  MOBILE_PROXY_HOST,
+  MOBILE_PROXY_PASS,
+  MOBILE_PROXY_PORT,
+  MOBILE_PROXY_USER,
+  USE_MOBILE_PROXY,
   VPS_LIGHT_MODE,
 )
 
@@ -354,6 +367,75 @@ def _sleep_with_stop(stop_event, seconds: float, step: float = 0.25):
     if remaining <= 0:
       return
     sleep(min(step, remaining))
+
+
+_LAST_AVITO_ENTER_AT = 0.0
+
+
+def _throttle_avito_enter(stop_event=None):
+  """Запрет на слишком частые заходы на Avito в рамках одного процесса."""
+  global _LAST_AVITO_ENTER_AT
+  min_gap = random.uniform(float(AVITO_ENTER_THROTTLE_MIN_SEC), float(AVITO_ENTER_THROTTLE_MAX_SEC))
+  now = time.time()
+  wait_sec = (_LAST_AVITO_ENTER_AT + min_gap) - now
+  if wait_sec > 0:
+    print(f"[AVITO] THROTTLE: пауза {int(wait_sec)} сек перед новым заходом.")
+    _sleep_with_stop(stop_event, wait_sec)
+  _LAST_AVITO_ENTER_AT = time.time()
+
+
+def _get_public_ip_via_proxy(timeout_sec: float = 20.0) -> str:
+  """Получаем внешний IP; при включенном мобильном прокси — через его же цепочку."""
+  targets = [
+    "https://httpbin.org/ip",
+    "https://api64.ipify.org?format=json",
+  ]
+  opener = None
+  if USE_MOBILE_PROXY and MOBILE_PROXY_HOST and MOBILE_PROXY_PORT:
+    auth = ""
+    if MOBILE_PROXY_USER:
+      user = quote(str(MOBILE_PROXY_USER), safe="")
+      pwd = quote(str(MOBILE_PROXY_PASS or ""), safe="")
+      auth = f"{user}:{pwd}@"
+    proxy_url = f"http://{auth}{MOBILE_PROXY_HOST}:{MOBILE_PROXY_PORT}"
+    opener = build_opener(ProxyHandler({"http": proxy_url, "https": proxy_url}))
+  for target in targets:
+    try:
+      resp = opener.open(target, timeout=timeout_sec) if opener else build_opener().open(target, timeout=timeout_sec)
+      raw = resp.read().decode("utf-8", errors="ignore").strip()
+      if not raw:
+        continue
+      payload = json.loads(raw)
+      ip = (payload.get("origin") or payload.get("ip") or "").strip()
+      # httpbin может вернуть "ip1, ip2"
+      if "," in ip:
+        ip = ip.split(",")[0].strip()
+      if ip:
+        return ip
+    except Exception:
+      continue
+  return ""
+
+
+def wait_for_new_ip(previous_ip: str, stop_event=None) -> str:
+  """Ждём фактическую смену IP у мобильного прокси."""
+  print("[AVITO] WAITING FOR NEW IP…")
+  deadline = time.time() + float(AVITO_WAIT_NEW_IP_TIMEOUT_SEC)
+  prev = (previous_ip or "").strip()
+  while time.time() < deadline:
+    if stop_event is not None and stop_event.is_set():
+      return ""
+    now_ip = _get_public_ip_via_proxy()
+    if now_ip and now_ip != prev:
+      print(f"[AVITO] NEW IP DETECTED: {now_ip}")
+      cooldown = random.uniform(float(AVITO_COOLDOWN_AFTER_NEW_IP_SEC), float(AVITO_COOLDOWN_AFTER_NEW_IP_SEC) + 8.0)
+      if cooldown > 0:
+        print(f"[AVITO] После смены IP охлаждение {int(cooldown)} сек…")
+        _sleep_with_stop(stop_event, cooldown)
+      return now_ip
+    _sleep_with_stop(stop_event, float(AVITO_WAIT_NEW_IP_POLL_SEC))
+  print("[AVITO] WAITING FOR NEW IP: таймаут, продолжаю с текущим состоянием сети.")
+  return ""
 
 
 def _reset_avito_session_artifacts(driver):
@@ -3318,6 +3400,9 @@ def parse_avito(
     first_delay = random.uniform(6.0, 12.5)
     print(f"[AVITO] Старт через {first_delay:.0f} сек…")
     _sleep_with_stop(stop_event, first_delay)
+  last_known_ip = _get_public_ip_via_proxy()
+  if last_known_ip:
+    print(f"[AVITO] Текущий внешний IP: {last_known_ip}")
 
   while True:
     if stop_event is not None and stop_event.is_set():
@@ -3375,6 +3460,8 @@ def parse_avito(
       open_try_max = 2 if page == 1 else 3
       for attempt in range(1, open_try_max + 1):
         try:
+          _throttle_avito_enter(stop_event)
+          print("[AVITO] ENTER AVITO")
           if page == 1:
             # Чередуем мягкие сценарии входа, чтобы не стучаться всегда одним паттерном.
             strategy = (block_round + attempt) % 3
@@ -3513,8 +3600,12 @@ def parse_avito(
             print(f"[AVITO] status_callback: {e}")
         _sleep_with_stop(stop_event, transport_wait)
         # Не пересоздаём сессию сразу: сохраняем рабочий IP/сессию, если она ещё жива.
-        if page > 1 and transport_failures_on_page >= 2 and driver_recreate_callback is not None:
+        if transport_failures_on_page >= 2 and driver_recreate_callback is not None:
           try:
+            new_ip = wait_for_new_ip(last_known_ip, stop_event)
+            if new_ip:
+              last_known_ip = new_ip
+            print("[AVITO] START NEW SESSION")
             new_driver = driver_recreate_callback()
             if new_driver is not None:
               driver = new_driver
@@ -3546,6 +3637,7 @@ def parse_avito(
 
       msg = f"[AVITO] Обнаружена блокировка/проверка ({reason})."
       print(msg)
+      print("[AVITO] BLOCK DETECTED")
       if status_callback:
         try:
           status_callback(
@@ -3602,6 +3694,18 @@ def parse_avito(
           )
         except Exception as e:
           print(f"[AVITO] status_callback: {e}")
+      if driver_recreate_callback is not None:
+        try:
+          new_ip = wait_for_new_ip(last_known_ip, stop_event)
+          if new_ip:
+            last_known_ip = new_ip
+          print("[AVITO] START NEW SESSION")
+          new_driver = driver_recreate_callback()
+          if new_driver is not None:
+            driver = new_driver
+            transport_failures_on_page = 0
+        except Exception as e:
+          print(f"[AVITO] Ошибка создания новой сессии после блока: {e}")
       _sleep_with_stop(stop_event, wait_block_sec)
 
     if abort_page_loop:
@@ -4067,11 +4171,12 @@ def parse_avito(
               )
       except Exception:
         pass
-      # Идем по всем страницам выдачи; AVITO_MAX_PAGES_PER_RUN — только как аварийный верхний предохранитель.
-      effective_max_pages = min(max(1, detected_pages), AVITO_MAX_PAGES_PER_RUN)
+      # Идем батчами страниц за один прогон: так стабильнее на слабом VPS и при мобильном прокси.
+      total_pages_cap = min(max(1, detected_pages), AVITO_MAX_PAGES_PER_RUN)
+      effective_max_pages = min(total_pages_cap, page - 1 + AVITO_PAGES_BATCH_SIZE)
       print(
         f"[AVITO] Страниц в выдаче: {detected_pages}. "
-        f"Буду парсить {effective_max_pages} стр. подряд."
+        f"Буду парсить {effective_max_pages} стр. подряд (батч {AVITO_PAGES_BATCH_SIZE})."
       )
       if status_callback:
         try:

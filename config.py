@@ -78,3 +78,16 @@ AVITO_DOM_WAIT_SHELL_NEXT = max(15, _env_int("AVITO_DOM_WAIT_SHELL_NEXT", 70))
 AVITO_DOM_WAIT_FILTERS_FIRST = max(20, _env_int("AVITO_DOM_WAIT_FILTERS_FIRST", 80))
 AVITO_DOM_WAIT_FILTERS_NEXT = max(15, _env_int("AVITO_DOM_WAIT_FILTERS_NEXT", 60))
 
+# Жёсткий throttle входов на Avito внутри одного процесса.
+AVITO_ENTER_THROTTLE_MIN_SEC = max(30, _env_int("AVITO_ENTER_THROTTLE_MIN_SEC", 120))
+AVITO_ENTER_THROTTLE_MAX_SEC = max(AVITO_ENTER_THROTTLE_MIN_SEC, _env_int("AVITO_ENTER_THROTTLE_MAX_SEC", 180))
+# Ожидание фактической смены IP мобильного прокси перед новой сессией.
+AVITO_WAIT_NEW_IP_TIMEOUT_SEC = max(30, _env_int("AVITO_WAIT_NEW_IP_TIMEOUT_SEC", 420))
+AVITO_WAIT_NEW_IP_POLL_SEC = max(5, _env_int("AVITO_WAIT_NEW_IP_POLL_SEC", 12))
+AVITO_COOLDOWN_AFTER_NEW_IP_SEC = max(0, _env_int("AVITO_COOLDOWN_AFTER_NEW_IP_SEC", 12))
+# Батчинг страниц: не пытаться за один прогон обрабатывать слишком много.
+AVITO_PAGES_BATCH_SIZE = max(1, _env_int("AVITO_PAGES_BATCH_SIZE", 25))
+# Автоперезапуск прогона в боте при временных ошибках.
+AVITO_RUN_RESTART_ATTEMPTS = max(1, _env_int("AVITO_RUN_RESTART_ATTEMPTS", 2))
+AVITO_RUN_RESTART_BACKOFF_SEC = max(5, _env_int("AVITO_RUN_RESTART_BACKOFF_SEC", 30))
+

@@ -408,6 +408,7 @@ async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFA
   # Импортируем локально, чтобы не тянуть Selenium при старте бота
   from main import build_driver
   from avito_parser import parse_avito
+  from config import AVITO_RUN_RESTART_ATTEMPTS, AVITO_RUN_RESTART_BACKOFF_SEC
   from excel_export import export_to_excel
 
   supabase: Client = context.bot_data.get("supabase_client")
@@ -563,11 +564,27 @@ async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFA
       except Exception:
         pass
 
-  # Повторы при капче — внутри parse_avito (до AVITO_BLOCK_MAX_RETRIES_PER_PAGE на каждую страницу).
+  # Повторы при капче — внутри parse_avito; здесь добавляем автоперезапуск прогона при аварии.
   filepath = None
+  attempts = max(1, int(AVITO_RUN_RESTART_ATTEMPTS))
   try:
-    if not stop_event.is_set():
-      filepath = await asyncio.to_thread(_sync_once)
+    for run_try in range(1, attempts + 1):
+      if stop_event.is_set():
+        break
+      try:
+        filepath = await asyncio.to_thread(_sync_once)
+        break
+      except Exception as e:
+        if run_try < attempts and not stop_event.is_set():
+          wait_sec = int(AVITO_RUN_RESTART_BACKOFF_SEC * run_try)
+          await update.message.reply_text(
+            f"⚠️ Временная ошибка запуска ({run_try}/{attempts}): {e}\n"
+            f"Повторяю через {wait_sec} сек…",
+            reply_markup=build_stop_keyboard(),
+          )
+          await asyncio.sleep(wait_sec)
+          continue
+        raise
   except Exception as e:
     context.user_data.pop("active_parse", None)
     context.user_data.pop("avito_parse_start_msg_id", None)
