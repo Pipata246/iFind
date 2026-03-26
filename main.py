@@ -151,6 +151,9 @@ def build_driver(headless=True):
       "suppress_connection_errors": True,
       # Мы не читаем трафик Selenium Wire в коде — уменьшаем нагрузку на слабый VPS.
       "disable_capture": True,
+      # На части мобильных прокси http2 в mitmproxy даёт BrokenPipe/TcpDisconnect.
+      # Принудительно оставляем более стабильный путь через HTTP/1.1.
+      "mitm_http2": False,
     }
 
   driver = webdriver.Chrome(service=service, options=chrome_options, seleniumwire_options=seleniumwire_options)
