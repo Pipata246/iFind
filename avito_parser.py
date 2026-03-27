@@ -3428,6 +3428,7 @@ def parse_avito(
     # Защита: капча/блокировка — до 3 раз на КАЖДУЮ страницу (счётчик сбрасывается на новой странице),
     # пауза между раундами — смена IP у мобильного прокси.
     abort_page_loop = False
+    skip_current_page = False
     transport_failures_on_page = 0
     unlimited_entry_mode = (page == 1 and not all_items)
     max_rounds_for_page = None if unlimited_entry_mode else AVITO_BLOCK_MAX_RETRIES_PER_PAGE
@@ -3676,10 +3677,17 @@ def parse_avito(
         # Фатально падаем только если блок на первой странице и ещё нечего отдавать.
         if raise_on_block and page <= 1 and not all_items:
           raise AvitoBlockedError(msg)
-        print(
-          "[AVITO] Лимит попыток на этой странице — завершаю текущий прогон с уже собранными объявлениями."
-        )
-        abort_page_loop = True
+        if page > 1:
+          print(
+            "[AVITO] Лимит попыток на странице исчерпан — пропускаю страницу и продолжаю парсинг дальше."
+          )
+          skip_current_page = True
+        else:
+          print(
+            "[AVITO] Лимит попыток на первой странице — завершаю текущий прогон с уже собранными объявлениями."
+          )
+          abort_page_loop = True
+          break
         break
       if status_callback:
         try:
@@ -3710,6 +3718,15 @@ def parse_avito(
 
     if abort_page_loop:
       break
+    if skip_current_page:
+      page += 1
+      if page > effective_max_pages:
+        print("[AVITO] Достиг конец страниц по примененным фильтрам.")
+        break
+      delay = random.uniform(page_delay * 0.8, page_delay * 1.3)
+      print(f"[AVITO] Пауза {delay:.0f} сек перед следующей страницей (после пропуска)…")
+      _sleep_with_stop(stop_event, delay)
+      continue
 
     # Критично: НЕ продолжаем, пока не появились карточки и (для стр.1 с фильтрами) панель фильтров.
     # Иначе клики по фильтрам идут в пустой DOM и фильтры «не находятся».
@@ -3968,10 +3985,19 @@ def parse_avito(
     if not dom_ready:
       print(
         f"[AVITO] Не удалось получить карточки/панель фильтров после {dom_reload_max} перезаходов. "
-        "Останавливаю текущий прогон, чтобы не парсить неверную выдачу."
+        "На этой странице пропускаю сбор и перехожу дальше."
       )
-      abort_page_loop = True
-      break
+      if page <= 1 and not all_items:
+        abort_page_loop = True
+        break
+      page += 1
+      if page > effective_max_pages:
+        print("[AVITO] Достиг конец страниц по примененным фильтрам.")
+        break
+      delay = random.uniform(page_delay * 0.8, page_delay * 1.3)
+      print(f"[AVITO] Пауза {delay:.0f} сек перед следующей страницей (после пропуска)…")
+      _sleep_with_stop(stop_event, delay)
+      continue
 
     wait = WebDriverWait(driver, EXPLICIT_WAIT)
     # КРИТИЧНО: после fallback «без UI» нельзя снова жать фильтры — иначе снова 0 карточек.

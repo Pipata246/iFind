@@ -25,14 +25,17 @@ AVITO_FILTER_HEADERS = [
 ]
 
 
-def export_to_excel(items, filename_prefix="results"):
+def export_to_excel(items, filename_prefix="results", filepath=None):
   if not items:
     print("Нет данных для экспорта в Excel.")
     return None
 
-  ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-  filename = f"{filename_prefix}_{ts}.xlsx"
-  filepath = os.path.join(os.getcwd(), filename)
+  if filepath:
+    outpath = filepath
+  else:
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"{filename_prefix}_{ts}.xlsx"
+    outpath = os.path.join(os.getcwd(), filename)
 
   wb = Workbook()
   ws = wb.active
@@ -48,7 +51,7 @@ def export_to_excel(items, filename_prefix="results"):
   for row in items:
     ws.append([row.get(h, "") for h in headers])
 
-  wb.save(filepath)
-  print(f"Excel сохранен: {filepath}")
-  return filepath
+  wb.save(outpath)
+  print(f"Excel сохранен: {outpath}")
+  return outpath
 
