@@ -39,6 +39,16 @@ def _env_int(name, default):
     return default
 
 
+def _env_float(name, default):
+  raw = os.getenv(name)
+  if raw is None or not str(raw).strip():
+    return default
+  try:
+    return float(raw)
+  except ValueError:
+    return default
+
+
 USE_MOBILE_PROXY = _env_bool("USE_MOBILE_PROXY", True)
 
 MOBILE_PROXY_HOST = os.getenv("MOBILE_PROXY_HOST", "91.221.70.204")
@@ -57,6 +67,8 @@ WB_BASE_URL = os.getenv("WB_BASE_URL", "https://www.wildberries.ru").rstrip("/")
 
 # Light mode for low-resource VPS (1 vCPU / 1GB RAM): less pages and shorter pauses.
 VPS_LIGHT_MODE = _env_bool("VPS_LIGHT_MODE", False)
+# Дополнительные флаги Chrome (фон, память) без полного «лёгкого» режима парсера.
+AVITO_LIGHTWEIGHT_CHROME = _env_bool("AVITO_LIGHTWEIGHT_CHROME", False)
 # Для отладки: показать окно браузера в Telegram-ране (headless=False).
 TELEGRAM_SHOW_BROWSER = _env_bool("TELEGRAM_SHOW_BROWSER", False)
 
@@ -78,9 +90,11 @@ AVITO_DOM_WAIT_SHELL_NEXT = max(15, _env_int("AVITO_DOM_WAIT_SHELL_NEXT", 70))
 AVITO_DOM_WAIT_FILTERS_FIRST = max(20, _env_int("AVITO_DOM_WAIT_FILTERS_FIRST", 80))
 AVITO_DOM_WAIT_FILTERS_NEXT = max(15, _env_int("AVITO_DOM_WAIT_FILTERS_NEXT", 60))
 
-# Жёсткий throttle входов на Avito внутри одного процесса.
-AVITO_ENTER_THROTTLE_MIN_SEC = max(30, _env_int("AVITO_ENTER_THROTTLE_MIN_SEC", 120))
-AVITO_ENTER_THROTTLE_MAX_SEC = max(AVITO_ENTER_THROTTLE_MIN_SEC, _env_int("AVITO_ENTER_THROTTLE_MAX_SEC", 180))
+# Throttle входов на Avito внутри одного процесса (случайный интервал между MIN и MAX сек).
+AVITO_ENTER_THROTTLE_MIN_SEC = max(0, _env_int("AVITO_ENTER_THROTTLE_MIN_SEC", 120))
+AVITO_ENTER_THROTTLE_MAX_SEC = max(
+  AVITO_ENTER_THROTTLE_MIN_SEC, _env_int("AVITO_ENTER_THROTTLE_MAX_SEC", 180)
+)
 # Ожидание фактической смены IP мобильного прокси перед новой сессией.
 AVITO_WAIT_NEW_IP_TIMEOUT_SEC = max(30, _env_int("AVITO_WAIT_NEW_IP_TIMEOUT_SEC", 420))
 AVITO_WAIT_NEW_IP_POLL_SEC = max(5, _env_int("AVITO_WAIT_NEW_IP_POLL_SEC", 12))
@@ -90,4 +104,17 @@ AVITO_PAGES_BATCH_SIZE = max(1, _env_int("AVITO_PAGES_BATCH_SIZE", 25))
 # Автоперезапуск прогона в боте при временных ошибках.
 AVITO_RUN_RESTART_ATTEMPTS = max(1, _env_int("AVITO_RUN_RESTART_ATTEMPTS", 2))
 AVITO_RUN_RESTART_BACKOFF_SEC = max(5, _env_int("AVITO_RUN_RESTART_BACKOFF_SEC", 30))
+AVITO_RUN_RESTART_BACKOFF_JITTER_SEC = max(0, _env_int("AVITO_RUN_RESTART_BACKOFF_JITTER_SEC", 15))
+
+# Единая политика повторов при открытии/ожидании страницы (без обхода антибота).
+AVITO_PAGE_LOAD_MAX_RETRIES = max(1, _env_int("AVITO_PAGE_LOAD_MAX_RETRIES", 5))
+AVITO_RETRY_BACKOFF_BASE_SEC = max(1.0, _env_float("AVITO_RETRY_BACKOFF_BASE_SEC", 8.0))
+AVITO_RETRY_BACKOFF_MAX_SEC = max(
+  AVITO_RETRY_BACKOFF_BASE_SEC, _env_float("AVITO_RETRY_BACKOFF_MAX_SEC", 120.0)
+)
+AVITO_RETRY_JITTER_SEC = max(0.0, _env_float("AVITO_RETRY_JITTER_SEC", 4.0))
+
+# Пересоздание драйвера для снижения утечек памяти на слабом VPS (0 = отключено).
+AVITO_DRIVER_RECYCLE_AFTER_PAGES = max(0, _env_int("AVITO_DRIVER_RECYCLE_AFTER_PAGES", 0))
+AVITO_DRIVER_RECYCLE_AFTER_ERRORS = max(0, _env_int("AVITO_DRIVER_RECYCLE_AFTER_ERRORS", 0))
 

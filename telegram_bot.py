@@ -10,6 +10,7 @@ from supabase import Client, create_client
 from telegram import KeyboardButton, ReplyKeyboardMarkup, Update
 from telegram.error import TimedOut, NetworkError
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+import random
 import time
 
 
@@ -408,7 +409,11 @@ async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFA
   # Импортируем локально, чтобы не тянуть Selenium при старте бота
   from main import build_driver
   from avito_parser import parse_avito
-  from config import AVITO_RUN_RESTART_ATTEMPTS, AVITO_RUN_RESTART_BACKOFF_SEC
+  from config import (
+    AVITO_RUN_RESTART_ATTEMPTS,
+    AVITO_RUN_RESTART_BACKOFF_JITTER_SEC,
+    AVITO_RUN_RESTART_BACKOFF_SEC,
+  )
   from excel_export import export_to_excel
 
   supabase: Client = context.bot_data.get("supabase_client")
@@ -449,19 +454,20 @@ async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFA
   start_msg = await update.message.reply_text("Запуск…", reply_markup=build_stop_keyboard())
   context.user_data["avito_parse_start_msg_id"] = start_msg.message_id
 
+  checkpoint_filepath = os.path.join(os.getcwd(), f"parsing_avito_checkpoint_{telegram_id}.xlsx")
+  try:
+    if os.path.exists(checkpoint_filepath):
+      os.remove(checkpoint_filepath)
+  except Exception:
+    pass
+
   loop = asyncio.get_running_loop()
 
   def _sync_once():
     driver = None
     partial_items: list[dict] = []
-    checkpoint_filepath = os.path.join(os.getcwd(), f"parsing_avito_checkpoint_{telegram_id}.xlsx")
     checkpoint_saved = False
     try:
-      try:
-        if os.path.exists(checkpoint_filepath):
-          os.remove(checkpoint_filepath)
-      except Exception:
-        pass
       driver = build_driver(headless=True)
       context.user_data["active_parse"]["driver"] = driver
       status_state = {
@@ -526,18 +532,22 @@ async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFA
           print(f"[bot] Ошибка recreate driver: {e}")
           return None
 
-      def _checkpoint_cb(items_snapshot: list[dict]):
+      def _checkpoint_cb(items_snapshot: list[dict], *, page: int = 0, total_items: int = 0):
         nonlocal partial_items, checkpoint_saved
         try:
           partial_items = list(items_snapshot or [])
           # Чекпоинт перед переходом к следующей странице: перезаписываем один и тот же файл.
           if partial_items:
-            export_to_excel(
+            out = export_to_excel(
               partial_items,
               filename_prefix="parsing_avito_checkpoint",
               filepath=checkpoint_filepath,
             )
             checkpoint_saved = True
+            n = int(total_items) if total_items else len(partial_items)
+            print(
+              f"[AVITO] CHECKPOINT SAVED page={int(page)} total_items={n} filepath={out}"
+            )
         except Exception:
           partial_items = []
 
@@ -606,6 +616,7 @@ async def run_avito_parsing_and_store(update: Update, context: ContextTypes.DEFA
       except Exception as e:
         if run_try < attempts and not stop_event.is_set():
           wait_sec = int(AVITO_RUN_RESTART_BACKOFF_SEC * run_try)
+          wait_sec += random.randint(0, max(0, int(AVITO_RUN_RESTART_BACKOFF_JITTER_SEC)))
           await update.message.reply_text(
             f"⚠️ Временная ошибка запуска ({run_try}/{attempts}): {e}\n"
             f"Повторяю через {wait_sec} сек…",

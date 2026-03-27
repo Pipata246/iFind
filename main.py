@@ -12,6 +12,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 from avito_parser import parse_avito
 from config import (
+  AVITO_LIGHTWEIGHT_CHROME,
   IMPLICIT_WAIT,
   MOBILE_PROXY_HOST,
   MOBILE_PROXY_PASS,
@@ -109,7 +110,7 @@ def build_driver(headless=True):
   chrome_options.add_argument("--disable-blink-features=AutomationControlled")
   chrome_options.add_argument("--no-sandbox")
   chrome_options.add_argument("--disable-dev-shm-usage")
-  if VPS_LIGHT_MODE:
+  if VPS_LIGHT_MODE or AVITO_LIGHTWEIGHT_CHROME:
     # Меньше памяти и нагрузки на 1 GB RAM VPS.
     chrome_options.add_argument("--window-size=1280,720")
     chrome_options.add_argument("--disable-extensions")

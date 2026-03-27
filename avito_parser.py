@@ -16,16 +16,22 @@ from browser_helpers import wait_for_document_ready
 from config import (
   AVITO_BASE_URL,
   AVITO_BLOCK_MAX_RETRIES_PER_PAGE,
+  AVITO_COOLDOWN_AFTER_NEW_IP_SEC,
   AVITO_DOM_RELOAD_TRIES,
   AVITO_DOM_WAIT_FILTERS_FIRST,
   AVITO_DOM_WAIT_FILTERS_NEXT,
   AVITO_DOM_WAIT_SHELL_FIRST,
   AVITO_DOM_WAIT_SHELL_NEXT,
+  AVITO_DRIVER_RECYCLE_AFTER_ERRORS,
+  AVITO_DRIVER_RECYCLE_AFTER_PAGES,
   AVITO_ENTER_THROTTLE_MAX_SEC,
   AVITO_ENTER_THROTTLE_MIN_SEC,
   AVITO_MAX_PAGES_PER_RUN,
+  AVITO_PAGE_LOAD_MAX_RETRIES,
   AVITO_PAGES_BATCH_SIZE,
-  AVITO_COOLDOWN_AFTER_NEW_IP_SEC,
+  AVITO_RETRY_BACKOFF_BASE_SEC,
+  AVITO_RETRY_BACKOFF_MAX_SEC,
+  AVITO_RETRY_JITTER_SEC,
   AVITO_WAIT_NEW_IP_POLL_SEC,
   AVITO_WAIT_NEW_IP_TIMEOUT_SEC,
   DOCUMENT_READY_TIMEOUT,
@@ -384,9 +390,54 @@ def _throttle_avito_enter(stop_event=None):
   _LAST_AVITO_ENTER_AT = time.time()
 
 
+def _classify_open_exception(exc: BaseException) -> str:
+  """Классификация ошибки загрузки страницы: timeout / transport / other."""
+  if isinstance(exc, TimeoutException):
+    return "timeout"
+  err = str(exc).lower()
+  if any(
+    x in err
+    for x in (
+      "connection",
+      "reset",
+      "10054",
+      "econnreset",
+      "tcp",
+      "refused",
+      "broken pipe",
+      "tunnel",
+      "proxy",
+      "net::",
+      "err_",
+      "target frame detached",
+      "no such window",
+      "invalid session",
+    )
+  ):
+    return "transport"
+  return "other"
+
+
+def _retry_backoff_sleep(attempt: int, stop_event, reason: str) -> None:
+  exp = float(AVITO_RETRY_BACKOFF_BASE_SEC) * (2 ** max(0, attempt - 1))
+  delay = min(float(AVITO_RETRY_BACKOFF_MAX_SEC), exp) + random.uniform(0.0, float(AVITO_RETRY_JITTER_SEC))
+  print(f"[AVITO] Backoff ({reason}, attempt {attempt}): {delay:.1f} sec")
+  _sleep_with_stop(stop_event, delay)
+
+
+def _call_checkpoint_callback(cb, items_snapshot: list, *, page: int, total_items: int):
+  if not cb:
+    return
+  try:
+    cb(items_snapshot, page=page, total_items=total_items)
+  except TypeError:
+    cb(items_snapshot)
+
+
 def _get_public_ip_via_proxy(timeout_sec: float = 20.0) -> str:
-  """Получаем внешний IP; при включенном мобильном прокси — через его же цепочку."""
+  """Получаем внешний IP; при включенном мобильном прокси — через его же цепочку (httpbin / ipify)."""
   targets = [
+    "https://api.ipify.org?format=json",
     "https://httpbin.org/ip",
     "https://api64.ipify.org?format=json",
   ]
@@ -418,8 +469,8 @@ def _get_public_ip_via_proxy(timeout_sec: float = 20.0) -> str:
 
 
 def wait_for_new_ip(previous_ip: str, stop_event=None) -> str:
-  """Ждём фактическую смену IP у мобильного прокси."""
-  print("[AVITO] WAITING FOR NEW IP…")
+  """Ждём фактическую смену IP у мобильного прокси (проверка через тот же прокси, что и браузер)."""
+  print("[AVITO] WAITING FOR NEW IP")
   deadline = time.time() + float(AVITO_WAIT_NEW_IP_TIMEOUT_SEC)
   prev = (previous_ip or "").strip()
   while time.time() < deadline:
@@ -434,7 +485,10 @@ def wait_for_new_ip(previous_ip: str, stop_event=None) -> str:
         _sleep_with_stop(stop_event, cooldown)
       return now_ip
     _sleep_with_stop(stop_event, float(AVITO_WAIT_NEW_IP_POLL_SEC))
-  print("[AVITO] WAITING FOR NEW IP: таймаут, продолжаю с текущим состоянием сети.")
+  print(
+    "[AVITO] WAITING FOR NEW IP: timeout — fallback, продолжаю с текущей сетью "
+    f"(лимит {AVITO_WAIT_NEW_IP_TIMEOUT_SEC} сек)."
+  )
   return ""
 
 
@@ -3380,6 +3434,9 @@ def parse_avito(
 
   all_items = []
   page = 1
+  print("[AVITO] PARSE RESUMED")
+  pages_since_driver_recycle = 0
+  session_errors_since_recycle = 0
   filter_meta = _filters_to_excel_meta(
     filters,
     today_only=bool(today_only),
@@ -3458,7 +3515,8 @@ def parse_avito(
           print(f"[AVITO] status_callback: {e}")
 
       loaded = False
-      open_try_max = 2 if page == 1 else 3
+      open_try_max = int(AVITO_PAGE_LOAD_MAX_RETRIES)
+      t_open0 = time.perf_counter()
       for attempt in range(1, open_try_max + 1):
         try:
           _throttle_avito_enter(stop_event)
@@ -3502,18 +3560,24 @@ def parse_avito(
           if not wait_for_document_ready(driver, DOCUMENT_READY_TIMEOUT, stop_event):
             raise TimeoutException("document.readyState не достиг готовности")
           loaded = True
+          dt_open = (time.perf_counter() - t_open0) * 1000.0
+          print(f"[AVITO] metric open_ms={dt_open:.0f} stage=ok")
           break
         except TimeoutException:
-          print(f"[AVITO] Таймаут загрузки (попытка {attempt}/{open_try_max}). Пауза 10 сек…")
-          _sleep_with_stop(stop_event, 10)
+          print(f"[AVITO] Таймаут загрузки (попытка {attempt}/{open_try_max}).")
+          session_errors_since_recycle += 1
+          _retry_backoff_sleep(attempt, stop_event, "timeout")
         except (WebDriverException, OSError, Exception) as e:
-          err = str(e).lower()
-          if "connection" in err or "reset" in err or "10054" in err or "econnreset" in err or "tcp" in err:
-            print(f"[AVITO] Обрыв соединения с прокси/сайтом (попытка {attempt}/{open_try_max}). Пауза 10 сек…")
+          kind = _classify_open_exception(e)
+          if kind == "transport":
+            print(f"[AVITO] Обрыв соединения с прокси/сайтом (попытка {attempt}/{open_try_max}): {e}")
           else:
-            print(f"[AVITO] Ошибка загрузки: {e}")
-          _sleep_with_stop(stop_event, 10)
+            print(f"[AVITO] Ошибка загрузки ({kind}, попытка {attempt}/{open_try_max}): {e}")
+          session_errors_since_recycle += 1
+          _retry_backoff_sleep(attempt, stop_event, kind)
       if not loaded:
+        dt_open = (time.perf_counter() - t_open0) * 1000.0
+        print(f"[AVITO] metric open_ms={dt_open:.0f} stage=failed")
         print(f"[AVITO] Не удалось загрузить страницу после {open_try_max} попыток. Проверьте прокси и сеть.")
         if unlimited_entry_mode:
           cooldown_sec = random.uniform(90.0, 180.0)
@@ -3523,6 +3587,13 @@ def parse_avito(
           )
           _sleep_with_stop(stop_event, cooldown_sec)
           continue
+        if page > 1:
+          print(
+            f"[AVITO] PAGE SKIPPED: page={page} reason=load_failed "
+            f"(после {open_try_max} попыток), продолжаю со следующей страницы."
+          )
+          skip_current_page = True
+          break
         abort_page_loop = True
         break
 
@@ -3610,6 +3681,8 @@ def parse_avito(
             new_driver = driver_recreate_callback()
             if new_driver is not None:
               driver = new_driver
+              pages_since_driver_recycle = 0
+              session_errors_since_recycle = 0
               if status_callback:
                 try:
                   status_callback({"phase": "driver_recreated", "page": int(page)})
@@ -3628,6 +3701,13 @@ def parse_avito(
             transport_failures_on_page = 0
             _sleep_with_stop(stop_event, cooldown_sec)
             continue
+          if page > 1:
+            print(
+              "[AVITO] PAGE SKIPPED: page=%s reason=transport_failures — продолжаю со следующей страницы."
+              % (page,)
+            )
+            skip_current_page = True
+            break
           print(
             "[AVITO] Много транспортных сбоев подряд на странице. "
             "Прерываю страницу раньше, чтобы запуск завершался быстрее и стабильнее."
@@ -3679,7 +3759,8 @@ def parse_avito(
           raise AvitoBlockedError(msg)
         if page > 1:
           print(
-            "[AVITO] Лимит попыток на странице исчерпан — пропускаю страницу и продолжаю парсинг дальше."
+            "[AVITO] PAGE SKIPPED: page=%s reason=block_retries_exhausted — продолжаю парсинг дальше."
+            % (page,)
           )
           skip_current_page = True
         else:
@@ -3712,6 +3793,8 @@ def parse_avito(
           if new_driver is not None:
             driver = new_driver
             transport_failures_on_page = 0
+            pages_since_driver_recycle = 0
+            session_errors_since_recycle = 0
         except Exception as e:
           print(f"[AVITO] Ошибка создания новой сессии после блока: {e}")
       _sleep_with_stop(stop_event, wait_block_sec)
@@ -3745,6 +3828,7 @@ def parse_avito(
         print(f"[AVITO] status_callback: {e}")
     ui_filters_temporarily_disabled = True
     dom_ready = False
+    t_dom0 = time.perf_counter()
     # По требованию: DOM-перезаходы ограничиваем тремя попытками, чтобы не зависать слишком долго.
     dom_reload_max = min(int(AVITO_DOM_RELOAD_TRIES), 3)
     for dom_try in range(1, dom_reload_max + 1):
@@ -3819,9 +3903,12 @@ def parse_avito(
         _sleep_with_stop(stop_event, transport_wait)
         if page > 1 and transport_failures_on_page >= 2 and driver_recreate_callback is not None:
           try:
+            print("[AVITO] START NEW SESSION")
             new_driver = driver_recreate_callback()
             if new_driver is not None:
               driver = new_driver
+              pages_since_driver_recycle = 0
+              session_errors_since_recycle = 0
               if status_callback:
                 try:
                   status_callback({"phase": "driver_recreated", "page": int(page)})
@@ -3830,6 +3917,13 @@ def parse_avito(
           except Exception as e:
             print(f"[AVITO] Ошибка пересоздания driver в DOM-цикле: {e}")
         if transport_failures_on_page >= 3:
+          if page > 1:
+            print(
+              "[AVITO] PAGE SKIPPED: page=%s reason=dom_transport_failures — продолжаю со следующей страницы."
+              % (page,)
+            )
+            skip_current_page = True
+            break
           print(
             "[AVITO] Много транспортных сбоев подряд в DOM-цикле. "
             "Прерываю страницу раньше, чтобы не зависать на длинных ожиданиях."
@@ -3982,11 +4076,26 @@ def parse_avito(
       except Exception as e:
         print(f"[AVITO] Ошибка перезахода на страницу: {e}")
 
-    if not dom_ready:
+    if skip_current_page:
+      page += 1
+      if page > effective_max_pages:
+        print("[AVITO] Достиг конец страниц по примененным фильтрам.")
+        break
+      delay = random.uniform(page_delay * 0.8, page_delay * 1.3)
+      print(f"[AVITO] Пауза {delay:.0f} сек перед следующей страницей (после пропуска)…")
+      _sleep_with_stop(stop_event, delay)
+      continue
+
+    if dom_ready:
+      print(f"[AVITO] metric dom_wait_ms={(time.perf_counter() - t_dom0) * 1000.0:.0f} stage=ok")
+    else:
+      print(f"[AVITO] metric dom_wait_ms={(time.perf_counter() - t_dom0) * 1000.0:.0f} stage=failed")
       print(
         f"[AVITO] Не удалось получить карточки/панель фильтров после {dom_reload_max} перезаходов. "
         "На этой странице пропускаю сбор и перехожу дальше."
       )
+      if page > 1:
+        print("[AVITO] PAGE SKIPPED: page=%s reason=dom_not_ready" % (page,))
       if page <= 1 and not all_items:
         abort_page_loop = True
         break
@@ -4127,6 +4236,7 @@ def parse_avito(
         raise
     elif page == 1:
       print("[AVITO] Быстрый режим: без UI-фильтров, отбор по выдаче (цена/память/сегодня/частник).")
+    t_parse0 = time.perf_counter()
     if scroll_passes > 0:
       _scroll_page(driver, scroll_passes, scroll_delay, stop_event=stop_event)
 
@@ -4281,11 +4391,37 @@ def parse_avito(
         print(f"[AVITO] Фильтр рейтинга 4+: отфильтровано {before - len(unique_items)} объявлений.")
 
     all_items.extend(_enrich_items_with_filter_meta(unique_items, filter_meta))
-    if checkpoint_callback:
-      try:
-        checkpoint_callback(all_items)
-      except Exception as e:
-        print(f"[AVITO] checkpoint_callback: {e}")
+    t_parse_ms = (time.perf_counter() - t_parse0) * 1000.0
+    print(f"[AVITO] metric parse_ms={t_parse_ms:.0f} stage=ok")
+    session_errors_since_recycle = 0
+    t_ckpt0 = time.perf_counter()
+    try:
+      _call_checkpoint_callback(checkpoint_callback, list(all_items), page=page, total_items=len(all_items))
+    except Exception as e:
+      print(f"[AVITO] checkpoint_callback: {e}")
+    print(f"[AVITO] metric checkpoint_ms={(time.perf_counter() - t_ckpt0) * 1000.0:.0f} stage=ok")
+    if driver_recreate_callback is not None:
+      if AVITO_DRIVER_RECYCLE_AFTER_PAGES > 0:
+        pages_since_driver_recycle += 1
+      if AVITO_DRIVER_RECYCLE_AFTER_PAGES > 0 and pages_since_driver_recycle >= AVITO_DRIVER_RECYCLE_AFTER_PAGES:
+        try:
+          print("[AVITO] START NEW SESSION (recycle: page budget)")
+          nd = driver_recreate_callback()
+          if nd is not None:
+            driver = nd
+            pages_since_driver_recycle = 0
+            session_errors_since_recycle = 0
+        except Exception as e:
+          print(f"[AVITO] Ошибка recycle driver: {e}")
+      elif AVITO_DRIVER_RECYCLE_AFTER_ERRORS > 0 and session_errors_since_recycle >= AVITO_DRIVER_RECYCLE_AFTER_ERRORS:
+        try:
+          print("[AVITO] START NEW SESSION (recycle: error budget)")
+          nd = driver_recreate_callback()
+          if nd is not None:
+            driver = nd
+            session_errors_since_recycle = 0
+        except Exception as e:
+          print(f"[AVITO] Ошибка recycle driver: {e}")
     if status_callback:
       try:
         status_callback(
@@ -4329,6 +4465,7 @@ def parse_avito(
     item.update(final_meta)
 
   print(f"[AVITO] Всего объявлений (с повторами): {len(all_items)}")
+  print("[AVITO] PARSE FINISHED")
   if status_callback and (stop_event is None or not stop_event.is_set()):
     try:
       status_callback({"phase": "parse_finished", "total_items": int(len(all_items))})
