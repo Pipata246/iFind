@@ -5,6 +5,36 @@ import random
 import shutil
 import time
 
+
+def _ensure_writable_tempdir() -> None:
+  """Selenium Wire при импорте тянет mitmproxy и вызывает tempfile.gettempdir().
+  На части VPS у процесса нет доступного /tmp (hardening, пустой TMPDIR) — падает до старта драйвера.
+  Задаём TMPDIR до `import seleniumwire`.
+  """
+  def _ok(path: str) -> bool:
+    try:
+      return bool(path) and os.path.isdir(path) and os.access(path, os.W_OK)
+    except Exception:
+      return False
+
+  for key in ("TMPDIR", "TEMP", "TMP"):
+    raw = (os.environ.get(key) or "").strip()
+    if raw and _ok(raw):
+      return
+  for cand in ("/tmp", "/var/tmp", "/usr/tmp"):
+    if _ok(cand):
+      os.environ.setdefault("TMPDIR", cand)
+      return
+  local = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".tmp")
+  try:
+    os.makedirs(local, mode=0o700, exist_ok=True)
+    os.environ["TMPDIR"] = local
+  except Exception:
+    pass
+
+
+_ensure_writable_tempdir()
+
 from seleniumwire import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
